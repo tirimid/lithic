@@ -1,0 +1,7 @@
+using c.stdio;
+
+proc *main(argc: i32, argv: u8^^): i32
+{
+	printf("hello world\n");
+	return 0; // implicit `i32` on untyped integer literals.
+}

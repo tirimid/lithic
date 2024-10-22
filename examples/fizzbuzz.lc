@@ -1,0 +1,35 @@
+using c.stdio;
+
+proc *main(argc: i32, argv: u8^^): i32
+{
+	for i: i32 mut := 0; i < 100; ++i
+	{
+		fizzbuzz(i);
+	}
+
+	return 0;
+}
+
+proc fizzbuzz(n: i32): null
+{
+	printed: bool mut := false;
+
+	if n % 3 == 0
+	{
+		printf("fizz");
+		printed := true;
+	}
+
+	if n % 5 == 0
+	{
+		printf("buzz");
+		printed := true;
+	}
+
+	if !printed
+	{
+		printf("%d", n);
+	}
+
+	printf("\n");
+}
