@@ -1,7 +1,6 @@
-using c.stdio;
+Import C.Stdio
 
-proc *main(argc: i32, argv: u8^^): i32
-{
-	printf("hello world\n");
-	return 0; // implicit `i32` on untyped integer literals.
-}
+Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+	printf("hello world\n")
+	Return 0 ; implicit `'32` on untyped integer literals.
+End

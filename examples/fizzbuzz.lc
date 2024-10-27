@@ -1,35 +1,31 @@
-using c.stdio;
+Import C.Stdio
 
-proc *main(argc: i32, argv: u8^^): i32
-{
-	for i: i32 mut := 0; i < 100; ++i
-	{
-		fizzbuzz(i);
-	}
+Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+	i: Int32 Mut := 0
+	While i < 100
+		FizzBuzz(i)
+		++i
+	End
 
-	return 0;
-}
+	Return 0
+End
 
-proc fizzbuzz(n: i32): null
-{
-	printed: bool mut := false;
+Proc FizzBuzz(n: Int32): Null
+	Printed: Bool Mut := False
 
-	if n % 3 == 0
-	{
-		printf("fizz");
-		printed := true;
-	}
+	If n % 3 == 0
+		printf("fizz")
+		Printed := True
+	End
 
-	if n % 5 == 0
-	{
-		printf("buzz");
-		printed := true;
-	}
+	If n % 5 == 0
+		printf("buzz")
+		Printed := True
+	End
 
-	if !printed
-	{
-		printf("%d", n);
-	}
+	If !printed
+		printf("%d", n)
+	End
 
 	printf("\n");
-}
+End
