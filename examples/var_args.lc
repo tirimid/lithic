@@ -1,0 +1,42 @@
+Import C.Stdio
+
+Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+	; test var arg print using `PrintAll()`.
+	PrintAll("hello", "world")
+	PrintAll("these", "words", "will", "form", "a", "sentence")
+	PrintAll()
+
+	; test var arg addition using `MulAdd()`.
+	printf("%d", MulAdd(2, 1, 2, 3))
+	printf("%d", MulAdd(3, 2, 2, 2))
+	printf("%d", MulAdd(0))
+
+	Return 0
+End
+
+Proc PrintAll(...)
+	i: Usize Mut := 0's
+	While i < VargCount
+		printf("%s ", NextVarg(Uint8^))
+		++i
+	End
+
+	printf("\n")
+End
+
+Proc MulAdd(Mul: Int32, ...): Int32
+	Sum: Int32 Mut := 0
+
+	i: Int32 Mut := 0
+	While i < Mul
+		j: Usize Mut := 0's
+		While j < VargCount
+			Sum += Mul * NextVarg(Int32)
+			++j
+		End
+		ResetVargs
+		++i
+	End
+
+	Return Sum
+End

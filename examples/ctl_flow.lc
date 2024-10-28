@@ -1,0 +1,41 @@
+Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+	; if chain.
+	If False
+		DoSomething()
+	Elif False
+		DoSomething()
+	Else
+		DoSomething()
+	End
+
+	; while loop
+	While False
+		DoSomething()
+		Break
+		Continue
+	End
+
+	; named blocks and block-break.
+	Block @'Named
+		Block
+			Break @'Named
+			DoSomething()
+		End
+	End
+
+	; switch-case for jump table.
+	; notice multi-condition and no fallthrough.
+	Switch 0
+		Case -2, -3, -4
+			DoSomething()
+		Case 1, 0, -1
+			DoSomething()
+	End
+
+	; return statement.
+	Return 0
+End
+
+Proc DoSomething()
+	; implementation here...
+End

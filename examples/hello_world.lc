@@ -1,4 +1,5 @@
-Import C.Stdio
+; instead of importing C standard IO, manually define an external printf symbol.
+Proc %printf(Uint8^, ...): Int32
 
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	printf("hello world\n")
