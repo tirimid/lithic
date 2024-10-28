@@ -12,6 +12,7 @@
 
 enum SizeMod
 {
+	SM_NULL = 0,
 	SM_8 = 8,
 	SM_16 = 16,
 	SM_32 = 32,
@@ -130,6 +131,7 @@ struct Conf
 
 struct FileData
 {
+	char *Name;
 	char *Data;
 	size_t Len;
 };
@@ -159,18 +161,20 @@ static void AddSpecialCharToken(struct LexData *Out, size_t Pos, size_t Len, enu
 static void AddToken(struct LexData *out, struct Token const *Tok);
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
-static int FileData_Read(struct FileData *Out);
+static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
 static int LexChar(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexString(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexNum(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexWord(struct FileData const *Data, struct Token *Out, size_t *i);
+static size_t LineNumber(char const *Str, size_t Pos);
 static void LogErr(char const *Fmt, ...);
 static void LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
 static void Usage(char const *Name);
+static int ValidateEscChar(char const *Src, size_t Pos);
 
 static struct Conf Conf;
 
@@ -181,7 +185,7 @@ main(int Argc, char const *Argv[])
 		return 1;
 	
 	struct FileData FileData = {0};
-	if (FileData_Read(&FileData))
+	if (FileData_Read(&FileData, Conf.InFp, Conf.InFile))
 		return 1;
 	
 	struct LexData LexData = {0};
@@ -305,25 +309,26 @@ Conf_Quit(void)
 }
 
 static int
-FileData_Read(struct FileData *Out)
+FileData_Read(struct FileData *Out, FILE *Fp, char const *File)
 {
 	// read input file.
 	{
-		fseek(Conf.InFp, 0, SEEK_END);
+		fseek(Fp, 0, SEEK_END);
 		
-		long Len = ftell(Conf.InFp);
+		long Len = ftell(Fp);
 		if (Len == -1)
 		{
-			LogErr("failed to get size of input file - '%s'!", Conf.InFile);
+			LogErr("failed to get size of input file - '%s'!", File);
 			return 1;
 		}
-		fseek(Conf.InFp, 0, SEEK_SET);
+		fseek(Fp, 0, SEEK_SET);
 		
+		Out->Name = strdup(File);
 		Out->Len = Len;
 		Out->Data = malloc(Len + 1);
-		if (fread(Out->Data, sizeof(char), Len, Conf.InFp) != Len)
+		if (fread(Out->Data, sizeof(char), Len, Fp) != Len)
 		{
-			LogErr("failed to read input file - '%s'!", Conf.InFile);
+			LogErr("failed to read input file - '%s'!", File);
 			return 1;
 		}
 		Out->Data[Len] = 0;
@@ -604,7 +609,81 @@ LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 static int
 LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 {
-	// TODO: implement.
+	size_t Lb = *i;
+	
+	// get integer literal base.
+	int NumBase;
+	{
+		if (*i + 1 < Data->Len && !strncmp(&Data->Data[*i], "0b", 2))
+		{
+			NumBase = 2;
+			*i += 2;
+		}
+		else if (*i + 1 < Data->Len && !strncmp(&Data->Data[*i], "0x", 2))
+		{
+			NumBase = 16;
+			*i += 2;
+		}
+		else
+			NumBase = 10;
+	}
+	
+	// get upper bound of number.
+	unsigned DpCnt = 0;
+	unsigned DigitsBeforeDp = 0, DigitsAfterDp = 0;
+	{
+		for (;;)
+		{
+			if (*i >= Data->Len
+			    || (NumBase == 2 && !strchr("01", Data->Data[*i]))
+			    || (NumBase == 10 && !isdigit(Data->Data[*i]))
+			    || (NumBase == 16 && !isxdigit(Data->Data[*i])))
+			{
+				break;
+			}
+			
+			DpCnt += Data->Data[*i] == '.';
+			DigitsBeforeDp += !DpCnt;
+			DigitsAfterDp += !!DpCnt;
+			
+			++*i;
+		}
+	}
+	
+	// perform non-numerical validation.
+	{
+		if (DpCnt > 0 && NumBase != 10)
+		{
+			LogProgErr(Data, Lb, "floating-point literals must be decimal!");
+			return 1;
+		}
+		
+		if (DpCnt > 0 && DigitsBeforeDp == 0)
+		{
+			LogProgErr(Data, Lb, "expected a digit prior to the decimal point!");
+			return 1;
+		}
+		
+		if (DpCnt > 0 && DigitsAfterDp == 0)
+		{
+			LogProgErr(Data, Lb, "expected a digit after the decimal point!");
+			return 1;
+		}
+		
+		if (DpCnt > 1)
+		{
+			LogProgErr(Data, Lb, "floating-point literals cannot have more than one decimal point!");
+			return 1;
+		}
+		
+		if (NumBase != 10 && *i == Lb + 2)
+		{
+			LogProgErr(Data, Lb, "expected value after base prefix!");
+			return 1;
+		}
+	}
+	
+	// TODO: finish implementing.
 	return 1;
 }
 
@@ -691,6 +770,15 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	return 0;
 }
 
+static size_t
+LineNumber(char const *Str, size_t Pos)
+{
+	size_t Line = 1;
+	for (size_t i = 0; i < Pos; ++i)
+		Line += Str[i] == '\n';
+	return Line;
+}
+
 static void
 LogErr(char const *Fmt, ...)
 {
@@ -707,7 +795,44 @@ LogErr(char const *Fmt, ...)
 static void
 LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...)
 {
-	// TODO: implement.
+	// write out error message.
+	{
+		va_list Args;
+		va_start(Args, Fmt);
+		
+		fprintf(stderr, "%s \x1b[31merr\x1b[0m: ", Data->Name);
+		vfprintf(stderr, Fmt, Args);
+		fprintf(stderr, "\n");
+		
+		va_end(Args);
+	}
+	
+	// write out line and error position indicator
+	{
+		size_t Begin = i;
+		while (Begin > 0 && Data->Data[Begin - 1] != '\n')
+			--Begin;
+		
+		size_t End = i;
+		while (End < Data->Len && Data->Data[End] != '\n')
+			++End;
+		
+		fprintf(stderr,
+		        "\x1b[2m[line %zu (byte %zu)]\n"
+		        "\\->\x1b[0m ",
+		        LineNumber(Data->Data, i),
+		        i);
+		
+		for (size_t j = Begin; j < End; ++j)
+			fprintf(stderr, "%c", Data->Data[j]);
+		
+		fprintf(stderr, "\n    ");
+		
+		for (size_t j = Begin; j < i; ++j)
+			fprintf(stderr, " ");
+		
+		fprintf(stderr, "\x1b[31m^\x1b[0m\n");
+	}
 }
 
 static char *
@@ -845,16 +970,24 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 static void
 Usage(char const *Name)
 {
-	printf("LithiC - Programming Language Transpiler\n"
+	printf("lithic - programming language transpiler\n"
 	       "\n"
-	       "For more information, consult the manual at the\n"
+	       "for more information, consult the manual at the\n"
 	       "following link: https://tirimid.net/tirimid/lithic.html\n"
 	       "\n"
 	       "usage:\n"
 	       "\t%s [options] file\n"
+	       "\n"
 	       "options:\n"
 	       "\t-h       display this help text\n"
 	       "\t-o file  write output to the specified file\n"
 	       "\t-L       dump the lexed tokens\n",
 	       Name);
+}
+
+static int
+ValidateEscChar(char const *Src, size_t Pos)
+{
+	// TODO: implement.
+	return 1;
 }
