@@ -13,11 +13,11 @@
 enum SizeMod
 {
 	SM_NULL = 0,
-	SM_8 = 8,
-	SM_16 = 16,
-	SM_32 = 32,
-	SM_64 = 64,
-	SM_SIZE = 64
+	SM_8,
+	SM_16,
+	SM_32,
+	SM_64,
+	SM_SIZE
 };
 
 enum TokenType
@@ -157,6 +157,14 @@ struct LexData
 	size_t TokCnt;
 };
 
+struct StrNumLimit
+{
+	char const *Limit;
+	size_t Len;
+	int Base;
+	unsigned char SizeMod;
+};
+
 static void AddSpecialCharToken(struct LexData *Out, size_t Pos, size_t Len, enum TokenType Type);
 static void AddToken(struct LexData *out, struct Token const *Tok);
 static int Conf_Read(int Argc, char const *Argv[]);
@@ -171,10 +179,36 @@ static int LexWord(struct FileData const *Data, struct Token *Out, size_t *i);
 static size_t LineNumber(char const *Str, size_t Pos);
 static void LogErr(char const *Fmt, ...);
 static void LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...);
+static unsigned SizeModBits(enum SizeMod Mod);
+static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
 static void Usage(char const *Name);
 static int ValidateEscChar(char const *Src, size_t Pos);
+
+static struct StrNumLimit StrNumLimits[] =
+{
+	// binary.
+	{"11111111", 8, 2, SM_8},
+	{"1111111111111111", 16, 2, SM_16},
+	{"11111111111111111111111111111111", 32, 2, SM_32},
+	{"1111111111111111111111111111111111111111111111111111111111111111", 64, 2, SM_64},
+	{"1111111111111111111111111111111111111111111111111111111111111111", 64, 2, SM_SIZE},
+	
+	// decimal.
+	{"255", 3, 10, SM_8},
+	{"65535", 5, 10, SM_16},
+	{"4294967295", 10, 10, SM_32},
+	{"18446744073709551615", 20, 10, SM_64},
+	{"18446744073709551615", 20, 10, SM_SIZE},
+	
+	// hexadecimal.
+	{"ff", 2, 16, SM_8},
+	{"ffff", 4, 16, SM_16},
+	{"ffffffff", 8, 16, SM_32},
+	{"ffffffffffffffff", 16, 16, SM_64},
+	{"ffffffffffffffff", 16, 16, SM_SIZE}
+};
 
 static struct Conf Conf;
 
@@ -214,7 +248,7 @@ AddSpecialCharToken(struct LexData *Out,
 	{
 		.Pos = Pos,
 		.Len = Len,
-		.Type = Type,
+		.Type = Type
 	};
 	AddToken(Out, &Tok);
 }
@@ -377,6 +411,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (LexWord(Data, &Tok, &i))
 					return 1;
 				AddToken(Out, &Tok);
+				--i;
 				continue;
 			}
 			else if (isdigit(Data->Data[i]))
@@ -385,6 +420,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (LexNum(Data, &Tok, &i))
 					return 1;
 				AddToken(Out, &Tok);
+				--i;
 				continue;
 			}
 			else if (Data->Data[i] == '\'')
@@ -393,6 +429,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (LexChar(Data, &Tok, &i))
 					return 1;
 				AddToken(Out, &Tok);
+				--i;
 				continue;
 			}
 			else if (Data->Data[i] == '"')
@@ -401,6 +438,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (LexString(Data, &Tok, &i))
 					return 1;
 				AddToken(Out, &Tok);
+				--i;
 				continue;
 			}
 		}
@@ -612,7 +650,7 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 	size_t Lb = *i;
 	
 	// get integer literal base.
-	int NumBase;
+	int NumBase = 10;
 	{
 		if (*i + 1 < Data->Len && !strncmp(&Data->Data[*i], "0b", 2))
 		{
@@ -624,9 +662,8 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 			NumBase = 16;
 			*i += 2;
 		}
-		else
-			NumBase = 10;
 	}
+	size_t NumLb = *i;
 	
 	// get upper bound of number.
 	unsigned DpCnt = 0;
@@ -635,9 +672,9 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 		for (;;)
 		{
 			if (*i >= Data->Len
-			    || (NumBase == 2 && !strchr("01", Data->Data[*i]))
-			    || (NumBase == 10 && !isdigit(Data->Data[*i]))
-			    || (NumBase == 16 && !isxdigit(Data->Data[*i])))
+			    || (NumBase == 2 && !strchr("01", Data->Data[*i]) && Data->Data[*i] != '.')
+			    || (NumBase == 10 && !isdigit(Data->Data[*i]) && Data->Data[*i] != '.')
+			    || (NumBase == 16 && !isxdigit(Data->Data[*i]) && Data->Data[*i] != '.'))
 			{
 				break;
 			}
@@ -648,7 +685,14 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 			
 			++*i;
 		}
+		
+		if (isalnum(Data->Data[*i]))
+		{
+			LogProgErr(Data, Lb, "number literal contains invalid digit - '%c'!", Data->Data[*i]);
+			return 1;
+		}
 	}
+	size_t NumUb = *i;
 	
 	// perform non-numerical validation.
 	{
@@ -676,15 +720,90 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 			return 1;
 		}
 		
-		if (NumBase != 10 && *i == Lb + 2)
+		if (NumBase != 10 && NumUb == Lb + 2)
 		{
 			LogProgErr(Data, Lb, "expected value after base prefix!");
 			return 1;
 		}
 	}
 	
-	// TODO: finish implementing.
-	return 1;
+	// get size modifier if present.
+	enum SizeMod SizeMod = SM_32;
+	if (Data->Data[*i] == '\'')
+	{
+		++*i;
+		size_t ModLb = *i;
+		
+		while (isalnum(Data->Data[*i]) || Data->Data[*i] == '_')
+			++*i;
+		
+		if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "64", 2))
+			SizeMod = SM_64;
+		else if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "32", 2))
+			SizeMod = SM_32;
+		else if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "16", 2))
+			SizeMod = SM_16;
+		else if (*i - ModLb == 1 && !strncmp(&Data->Data[ModLb], "8", 1))
+			SizeMod = SM_8;
+		else if (*i - ModLb == 1 && !strncmp(&Data->Data[ModLb], "s", 1))
+			SizeMod = SM_SIZE;
+		else
+		{
+			LogProgErr(Data, Lb, "number literal has invalid size modifier!");
+			return 1;
+		}
+		
+		if (DpCnt > 0 && SizeMod != SM_32 && SizeMod != SM_64)
+		{
+			LogProgErr(Data, Lb, "invalid size modifier on float literal, only 32 and 64 supported!");
+			return 1;
+		}
+	}
+	size_t Ub = *i;
+	
+	// perform numerical validation on integers.
+	if (DpCnt == 0)
+	{
+		bool Invalid = false;
+		for (size_t j = 0; j < sizeof(StrNumLimits) / sizeof(StrNumLimits[0]); ++j)
+		{
+			struct StrNumLimit const *Lim = &StrNumLimits[j];
+			if (Lim->Base != NumBase || Lim->SizeMod != SizeMod)
+				continue;
+			
+			if (StrNumCmp(&Data->Data[NumLb], NumUb - NumLb, Lim->Limit, Lim->Len) > 0)
+			{
+				Invalid = true;
+				break;
+			}
+		}
+		
+		if (Invalid)
+		{
+			LogProgErr(Data, Lb, "integer literal cannot fit in %d bits!", SizeModBits(SizeMod));
+			return 1;
+		}
+	}
+	
+	// yield successful token and write data based on literal type.
+	{
+		*Out = (struct Token)
+		{
+			.Pos = Lb,
+			.Len = Ub - Lb,
+			.SizeMod = SizeMod,
+			.Type = DpCnt ? TT_LIT_FLOAT : TT_LIT_INT
+		};
+		
+		char *Str = Substr(Data->Data, NumLb, NumUb);
+		if (DpCnt > 0)
+			Out->Data.Float = atof(Str);
+		else
+			Out->Data.Int = strtoul(Str, NULL, NumBase);
+		free(Str);
+	}
+	
+	return 0;
 }
 
 static int
@@ -764,7 +883,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		.Data.Str = Word,
 		.Pos = Lb,
 		.Len = *i - Lb,
-		.Type = Type,
+		.Type = Type
 	};
 	
 	return 0;
@@ -833,6 +952,67 @@ LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...)
 		
 		fprintf(stderr, "\x1b[31m^\x1b[0m\n");
 	}
+}
+
+static unsigned
+SizeModBits(enum SizeMod Mod)
+{
+	static unsigned Bits[] =
+	{
+		0,
+		8, // SM_8.
+		16, // SM_16.
+		32, // SM_32.
+		64, // SM_64.
+		64 // SM_SIZE.
+	};
+	
+	return Bits[Mod];
+}
+
+static int
+StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB)
+{
+	static int DigitValue[256] =
+	{
+		['0'] = 0,
+		['1'] = 1,
+		['2'] = 2,
+		['3'] = 3,
+		['4'] = 4,
+		['5'] = 5,
+		['6'] = 6,
+		['7'] = 7,
+		['8'] = 8,
+		['9'] = 9,
+		['a'] = 10,
+		['A'] = 10,
+		['b'] = 11,
+		['B'] = 11,
+		['c'] = 12,
+		['C'] = 12,
+		['d'] = 13,
+		['D'] = 13,
+		['e'] = 14,
+		['E'] = 14,
+		['f'] = 15,
+		['F'] = 15
+	};
+	
+	if (LenA > LenB)
+		return 1;
+	else if (LenA < LenB)
+		return -1;
+	
+	for (size_t i = 0; i < LenA; ++i)
+	{
+		if (DigitValue[(size_t)a[i]] > DigitValue[(size_t)b[i]])
+			return 1;
+		else if (DigitValue[(size_t)a[i]] < DigitValue[(size_t)b[i]])
+			return -1;
+	}
+	
+	return 0;
 }
 
 static char *
@@ -950,13 +1130,13 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		fprintf(Fp, " %s", Tok->Data.Str);
 		break;
 	case TT_LIT_STR:
-		fprintf(Fp, " S%d:%s", Tok->SizeMod, Tok->Data.Str);
+		fprintf(Fp, " S%d:%s", SizeModBits(Tok->SizeMod), Tok->Data.Str);
 		break;
 	case TT_LIT_INT:
-		fprintf(Fp, " S%d:%lu", Tok->SizeMod, Tok->Data.Int);
+		fprintf(Fp, " S%d:%lu", SizeModBits(Tok->SizeMod), Tok->Data.Int);
 		break;
 	case TT_LIT_FLOAT:
-		fprintf(Fp, " S%d:%f", Tok->SizeMod, Tok->Data.Float);
+		fprintf(Fp, " S%d:%f", SizeModBits(Tok->SizeMod), Tok->Data.Float);
 		break;
 	case TT_LIT_BOOL:
 		fprintf(Fp, " %s", Tok->Data.Bool ? "True" : "False");
