@@ -115,7 +115,8 @@ enum TokenType
 	TT_AMPERSAND_EQUAL,
 	TT_TILDE_EQUAL,
 	TT_PIPE_EQUAL,
-	TT_AT_QUOTE
+	TT_AT_QUOTE,
+	TT_COMMA
 };
 
 struct Conf
@@ -126,7 +127,7 @@ struct Conf
 	char const *OutFile;
 	FILE *OutFp;
 	
-	bool DumpToks;
+	bool DumpToks, DumpAst;
 };
 
 struct FileData
@@ -140,7 +141,11 @@ struct Token
 {
 	union
 	{
-		char *Str;
+		struct
+		{
+			char *Text;
+			size_t Len;
+		} Str;
 		uint64_t Int;
 		double Float;
 		bool Bool;
@@ -166,9 +171,12 @@ struct StrNumLimit
 };
 
 static void AddSpecialCharToken(struct LexData *Out, size_t Pos, size_t Len, enum TokenType Type);
-static void AddToken(struct LexData *out, struct Token const *Tok);
+static void AddToken(struct LexData *Out, struct Token const *Tok);
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
+static int ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len);
+static void DynStr_AppendChar(char **Str, size_t *Len, char Ch);
+static void DynStr_Init(char **Str, size_t *Len);
 static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
@@ -184,7 +192,6 @@ static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
 static void Usage(char const *Name);
-static int ValidateEscChar(char const *Src, size_t Pos);
 
 static struct StrNumLimit StrNumLimits[] =
 {
@@ -268,10 +275,13 @@ Conf_Read(int Argc, char const *Argv[])
 	
 	// get option arguments.
 	int c;
-	while ((c = getopt(Argc, (char *const *)Argv, "hLo:")) != -1)
+	while ((c = getopt(Argc, (char *const *)Argv, "AhLo:")) != -1)
 	{
 		switch (c)
 		{
+		case 'A':
+			Conf.DumpAst = true;
+			break;
 		case 'h':
 			Usage(Argv[0]);
 			exit(0);
@@ -340,6 +350,70 @@ Conf_Quit(void)
 		if (Conf.InFp)
 			fclose(Conf.InFp);
 	}
+}
+
+static int
+ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len)
+{
+	if (!strncmp(&Src[*i], "\\n", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\n');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\r", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\r');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\t", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\t');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\\\", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\\');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\'", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\'');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\\"", 2))
+	{
+		DynStr_AppendChar(Str, Len, '\"');
+		*i += 2;
+	}
+	else if (!strncmp(&Src[*i], "\\b", 2))
+	{
+		// TODO: implement binary sequences.
+	}
+	else if (!strncmp(&Src[*i], "\\x", 2))
+	{
+		// TODO: implement hex sequences.
+	}
+	else
+		return 1;
+	
+	return 0;
+}
+
+static void
+DynStr_AppendChar(char **Str, size_t *Len, char Ch)
+{
+	++*Len;
+	*Str = realloc(*Str, *Len + 1);
+	(*Str)[*Len - 1] = Ch;
+	(*Str)[*Len] = 0;
+}
+
+static void
+DynStr_Init(char **Str, size_t *Len)
+{
+	*Str = malloc(1);
+	(*Str)[0] = 0;
+	*Len = 0;
 }
 
 static int
@@ -620,6 +694,9 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				else
 					AddSpecialCharToken(Out, i, 1, TT_COLON);
 				break;
+			case ',':
+				AddSpecialCharToken(Out, i, 1, TT_COMMA);
+				break;
 			default:
 				LogProgErr(Data, i, "unhandled character - '%c'!", Data->Data[i]);
 				return 1;
@@ -640,8 +717,69 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 static int
 LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 {
-	// TODO: implement.
-	return 1;
+	size_t Lb = *i;
+	
+	char *StrData;
+	size_t StrDataLen;
+	DynStr_Init(&StrData, &StrDataLen);
+	
+	// get string data and length.
+	for (++*i; *i < Data->Len; ++*i)
+	{
+		if (Data->Data[*i] == '"')
+		{
+			++*i;
+			break;
+		}
+		else if (Data->Data[*i] == '\\')
+		{
+			if (ConvEscSequence(Data->Data, i, &StrData, &StrDataLen))
+			{
+				LogProgErr(Data, Lb, "invalid escape character in string - '%c'!", Data->Data[*i + 1]);
+				free(StrData);
+				return 1;
+			}
+			--*i;
+		}
+		else
+			DynStr_AppendChar(&StrData, &StrDataLen, Data->Data[*i]);
+	}
+	
+	// get size modifier if present.
+	enum SizeMod SizeMod = SM_8;
+	if (Data->Data[*i] == '\'')
+	{
+		++*i;
+		size_t ModLb = *i;
+		
+		while (isalnum(Data->Data[*i]) || Data->Data[*i] == '_')
+			++*i;
+		
+		if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "32", 2))
+			SizeMod = SM_32;
+		else if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "16", 2))
+			SizeMod = SM_16;
+		else if (*i - ModLb == 1 && !strncmp(&Data->Data[ModLb], "8", 1))
+			SizeMod = SM_8;
+		else
+		{
+			LogProgErr(Data, Lb, "string literal has invalid size modifier!");
+			free(StrData);
+			return 1;
+		}
+	}
+	
+	*Out = (struct Token)
+	{
+		.Data.Str.Text = StrData,
+		.Data.Str.Len = StrDataLen,
+		.Pos = Lb,
+		.Len = *i - Lb,
+		.SizeMod = SizeMod,
+		.Type = TT_LIT_STR
+	};
+	
+	return 0;
 }
 
 static int
@@ -880,7 +1018,8 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	
 	*Out = (struct Token)
 	{
-		.Data.Str = Word,
+		.Data.Str.Text = Word,
+		.Data.Str.Len = *i - Lb,
 		.Pos = Lb,
 		.Len = *i - Lb,
 		.Type = Type
@@ -943,7 +1082,7 @@ LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...)
 		        i);
 		
 		for (size_t j = Begin; j < End; ++j)
-			fprintf(stderr, "%c", Data->Data[j]);
+			fprintf(stderr, "%c", Data->Data[j] == '\t' ? ' ' : Data->Data[j]);
 		
 		fprintf(stderr, "\n    ");
 		
@@ -1120,17 +1259,18 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_AMPERSAND_ASSIGN",
 		"TT_TILDE_ASSIGN",
 		"TT_PIPE_ASSIGN",
-		"TT_AT_QUOTE"
+		"TT_AT_QUOTE",
+		"TT_COMMA"
 	};
 	
 	fprintf(Fp, "[%zu] [%zu+%zu]:%s", Ind, Tok->Pos, Tok->Len, Names[Tok->Type]);
 	switch (Tok->Type)
 	{
 	case TT_IDENT:
-		fprintf(Fp, " %s", Tok->Data.Str);
+		fprintf(Fp, " %s", Tok->Data.Str.Text);
 		break;
 	case TT_LIT_STR:
-		fprintf(Fp, " S%d:%s", SizeModBits(Tok->SizeMod), Tok->Data.Str);
+		fprintf(Fp, " S%d:%s", SizeModBits(Tok->SizeMod), Tok->Data.Str.Text);
 		break;
 	case TT_LIT_INT:
 		fprintf(Fp, " S%d:%lu", SizeModBits(Tok->SizeMod), Tok->Data.Int);
@@ -1159,15 +1299,9 @@ Usage(char const *Name)
 	       "\t%s [options] file\n"
 	       "\n"
 	       "options:\n"
+	       "\t-A       dump the parsed out AST\n"
 	       "\t-h       display this help text\n"
 	       "\t-o file  write output to the specified file\n"
 	       "\t-L       dump the lexed tokens\n",
 	       Name);
-}
-
-static int
-ValidateEscChar(char const *Src, size_t Pos)
-{
-	// TODO: implement.
-	return 1;
 }
