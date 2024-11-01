@@ -15,9 +15,9 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 End
 
 Proc PrintAll(...)
-	i: Usize Mut := 0's
+	Var i: Usize Mut := 0's
 	While i < VargCount
-		printf("%s ", NextVarg(Uint8^))
+		printf("%s ", NextVarg[Uint8^])
 		++i
 	End
 
@@ -25,13 +25,13 @@ Proc PrintAll(...)
 End
 
 Proc MulAdd(Mul: Int32, ...): Int32
-	Sum: Int32 Mut := 0
+	Var Sum: Int32 Mut := 0
 
-	i: Int32 Mut := 0
+	Var i: Int32 Mut := 0
 	While i < Mul
-		j: Usize Mut := 0's
+		Var j: Usize Mut := 0's
 		While j < VargCount
-			Sum += Mul * NextVarg(Int32)
+			Sum += Mul * NextVarg[Int32]
 			++j
 		End
 		ResetVargs

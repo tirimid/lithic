@@ -67,6 +67,7 @@ enum TokenType
 	TT_KW_UINT32,
 	TT_KW_UINT64,
 	TT_KW_USIZE,
+	TT_KW_VAR,
 	TT_KW_VARGCOUNT,
 	TT_KW_WHILE,
 	TT_KW_LAST__ = TT_KW_WHILE,
@@ -117,6 +118,71 @@ enum TokenType
 	TT_PIPE_EQUAL,
 	TT_AT_QUOTE,
 	TT_COMMA
+};
+
+enum NodeType
+{
+	NT_ROOT = 0,
+	
+	// expression nodes.
+	NT_EXPR,
+	NT_EXPR_ATOM,
+	NT_EXPR_LENOF,
+	NT_EXPR_NEXTVARG,
+	NT_EXPR_LAMBDA,
+	NT_EXPR_SIZEOF,
+	NT_EXPR_STRUCT,
+	NT_EXPR_VARGCOUNT,
+	NT_EXPR_POST_INC,
+	NT_EXPR_POST_DEC,
+	NT_EXPR_CALL,
+	NT_EXPR_NTH,
+	NT_EXPR_DEREF,
+	NT_EXPR_ACCESS,
+	NT_EXPR_CAST,
+	NT_EXPR_PRE_INC,
+	NT_EXPR_PRE_DEC,
+	NT_EXPR_UNARY_MINUS,
+	NT_EXPR_LOG_NOT,
+	NT_EXPR_BIT_NOT,
+	NT_EXPR_ADDR_OF,
+	NT_EXPR_MUL,
+	NT_EXPR_DIV,
+	NT_EXPR_MOD,
+	NT_EXPR_ADD,
+	NT_EXPR_SUB,
+	NT_EXPR_SHR,
+	NT_EXPR_SHL,
+	NT_EXPR_BIT_AND,
+	NT_EXPR_BIT_XOR,
+	NT_EXPR_BIT_OR,
+	NT_EXPR_GREATER,
+	NT_EXPR_GREQUAL,
+	NT_EXPR_LESS,
+	NT_EXPR_LEQUAL,
+	NT_EXPR_EQUAL,
+	NT_EXPR_NEQUAL,
+	NT_EXPR_LOG_AND,
+	NT_EXPR_LOG_XOR,
+	NT_EXPR_LOG_OR,
+	NT_EXPR_TERNARY,
+	NT_EXPR_ASSIGN,
+	NT_EXPR_ADD_ASSIGN,
+	NT_EXPR_SUB_ASSIGN,
+	NT_EXPR_MUL_ASSIGN,
+	NT_EXPR_DIV_ASSIGN,
+	NT_EXPR_MOD_ASSIGN,
+	NT_EXPR_SHR_ASSIGN,
+	NT_EXPR_SHL_ASSIGN,
+	NT_EXPR_BIT_AND_ASSIGN,
+	NT_EXPR_BIT_XOR_ASSIGN,
+	NT_EXPR_BIT_OR_ASSIGN
+};
+
+enum NodeFlag
+{
+	NF_PUBLIC = 0x1,
+	NF_EXTERN = 0x2
 };
 
 struct Conf
@@ -170,8 +236,17 @@ struct StrNumLimit
 	unsigned char SizeMod;
 };
 
-static void AddSpecialCharToken(struct LexData *Out, size_t Pos, size_t Len, enum TokenType Type);
-static void AddToken(struct LexData *Out, struct Token const *Tok);
+struct Node
+{
+	struct Token const **Toks;
+	size_t TokCnt;
+	
+	struct Node *Children;
+	size_t ChildCnt;
+	
+	unsigned char Type;
+};
+
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
 static int ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len);
@@ -181,12 +256,19 @@ static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
 static int LexChar(struct FileData const *Data, struct Token *Out, size_t *i);
+static void LexData_AddSpecialChar(struct LexData *Out, size_t Pos, size_t Len, enum TokenType Type);
+static void LexData_AddToken(struct LexData *Out, struct Token const *Tok);
 static int LexString(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexNum(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexWord(struct FileData const *Data, struct Token *Out, size_t *i);
 static size_t LineNumber(char const *Str, size_t Pos);
 static void LogErr(char const *Fmt, ...);
 static void LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...);
+static void LogTokErr(struct FileData const *Data, struct Token const *Tok, char const *Fmt, ...);
+static void Node_AddChild(struct Node *Node, struct Node const *Child);
+static void Node_AddToken(struct Node *Node, struct Token const *Tok);
+static void Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth);
+static int Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex);
 static unsigned SizeModBits(enum SizeMod Mod);
 static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
@@ -240,32 +322,19 @@ main(int Argc, char const *Argv[])
 		return 0;
 	}
 	
+	struct Node Ast = {0};
+	if (Parse(&Ast, &FileData, &LexData))
+		return 1;
+	
+	if (Conf.DumpAst)
+	{
+		Node_Print(Conf.OutFp, &Ast, 0);
+		return 0;
+	}
+	
 	// TODO: implement rest.
 	
 	return 0;
-}
-
-static void
-AddSpecialCharToken(struct LexData *Out,
-                    size_t Pos,
-                    size_t Len,
-                    enum TokenType Type)
-{
-	struct Token Tok =
-	{
-		.Pos = Pos,
-		.Len = Len,
-		.Type = Type
-	};
-	AddToken(Out, &Tok);
-}
-
-static void
-AddToken(struct LexData *Out, struct Token const *Tok)
-{
-	++Out->TokCnt;
-	Out->Toks = reallocarray(Out->Toks, Out->TokCnt, sizeof(struct Token));
-	Out->Toks[Out->TokCnt - 1] = *Tok;
 }
 
 static int
@@ -462,7 +531,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			if (Data->Data[i] == '\n')
 			{
 				InComment = false;
-				AddSpecialCharToken(Out, i, 1, TT_NEWLINE);
+				LexData_AddSpecialChar(Out, i, 1, TT_NEWLINE);
 				continue;
 			}
 			
@@ -484,7 +553,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				struct Token Tok;
 				if (LexWord(Data, &Tok, &i))
 					return 1;
-				AddToken(Out, &Tok);
+				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
 			}
@@ -493,7 +562,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				struct Token Tok;
 				if (LexNum(Data, &Tok, &i))
 					return 1;
-				AddToken(Out, &Tok);
+				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
 			}
@@ -502,7 +571,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				struct Token Tok;
 				if (LexChar(Data, &Tok, &i))
 					return 1;
-				AddToken(Out, &Tok);
+				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
 			}
@@ -511,7 +580,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				struct Token Tok;
 				if (LexString(Data, &Tok, &i))
 					return 1;
-				AddToken(Out, &Tok);
+				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
 			}
@@ -522,180 +591,180 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			switch (Data->Data[i])
 			{
 			case '(':
-				AddSpecialCharToken(Out, i, 1, TT_PBEGIN);
+				LexData_AddSpecialChar(Out, i, 1, TT_PBEGIN);
 				break;
 			case ')':
-				AddSpecialCharToken(Out, i, 1, TT_PEND);
+				LexData_AddSpecialChar(Out, i, 1, TT_PEND);
 				break;
 			case '[':
-				AddSpecialCharToken(Out, i, 1, TT_BKBEGIN);
+				LexData_AddSpecialChar(Out, i, 1, TT_BKBEGIN);
 				break;
 			case ']':
-				AddSpecialCharToken(Out, i, 1, TT_BKEND);
+				LexData_AddSpecialChar(Out, i, 1, TT_BKEND);
 				break;
 			case '+':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "++", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_PLUS);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_PLUS);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_PLUS);
+					LexData_AddSpecialChar(Out, i, 1, TT_PLUS);
 				break;
 			case '-':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "--", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_MINUS);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_MINUS);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_MINUS);
+					LexData_AddSpecialChar(Out, i, 1, TT_MINUS);
 				break;
 			case '@':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "@'", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_AT_QUOTE);
+					LexData_AddSpecialChar(Out, i, 2, TT_AT_QUOTE);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_AT);
+					LexData_AddSpecialChar(Out, i, 1, TT_AT);
 				break;
 			case '^':
-				AddSpecialCharToken(Out, i, 1, TT_CARET);
+				LexData_AddSpecialChar(Out, i, 1, TT_CARET);
 				break;
 			case '.':
-				AddSpecialCharToken(Out, i, 1, TT_PERIOD);
+				LexData_AddSpecialChar(Out, i, 1, TT_PERIOD);
 				break;
 			case '!':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "!=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_BANG_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_BANG_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_BANG);
+					LexData_AddSpecialChar(Out, i, 1, TT_BANG);
 				break;
 			case '~':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "~~", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_TILDE);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_TILDE);
 					++i;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "~=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_TILDE_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_TILDE_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_TILDE);
+					LexData_AddSpecialChar(Out, i, 1, TT_TILDE);
 				break;
 			case '&':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "&&", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_AMPERSAND);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_AMPERSAND);
 					++i;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "&=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_AMPERSAND_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_AMPERSAND_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_AMPERSAND);
+					LexData_AddSpecialChar(Out, i, 1, TT_AMPERSAND);
 				break;
 			case '*':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "*=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_ASTERISK_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_ASTERISK_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_ASTERISK);
+					LexData_AddSpecialChar(Out, i, 1, TT_ASTERISK);
 				break;
 			case '/':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "/=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_SLASH_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_SLASH_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_SLASH);
+					LexData_AddSpecialChar(Out, i, 1, TT_SLASH);
 				break;
 			case '%':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "%=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_PERCENT_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_PERCENT_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_PERCENT);
+					LexData_AddSpecialChar(Out, i, 1, TT_PERCENT);
 				break;
 			case '>':
 				if (i + 2 < Data->Len && !strncmp(&Data->Data[i], ">>=", 3))
 				{
-					AddSpecialCharToken(Out, i, 3, TT_DOUBLE_GREATER_EQUAL);
+					LexData_AddSpecialChar(Out, i, 3, TT_DOUBLE_GREATER_EQUAL);
 					i += 2;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], ">>", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_GREATER);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_GREATER);
 					++i;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], ">=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_GREQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_GREQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_GREATER);
+					LexData_AddSpecialChar(Out, i, 1, TT_GREATER);
 				break;
 			case '<':
 				if (i + 2 < Data->Len && !strncmp(&Data->Data[i], "<<=", 3))
 				{
-					AddSpecialCharToken(Out, i, 3, TT_DOUBLE_LESS_EQUAL);
+					LexData_AddSpecialChar(Out, i, 3, TT_DOUBLE_LESS_EQUAL);
 					i += 2;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "<<", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_LESS);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_LESS);
 					++i;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "<=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_LEQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_LEQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_LESS);
+					LexData_AddSpecialChar(Out, i, 1, TT_LESS);
 				break;
 			case '|':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "||", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_DOUBLE_PIPE);
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_PIPE);
 					++i;
 				}
 				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "|=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_PIPE_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_PIPE_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_PIPE);
+					LexData_AddSpecialChar(Out, i, 1, TT_PIPE);
 				break;
 			case '?':
-				AddSpecialCharToken(Out, i, 1, TT_QUESTION);
+				LexData_AddSpecialChar(Out, i, 1, TT_QUESTION);
 				break;
 			case ':':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], ":=", 2))
 				{
-					AddSpecialCharToken(Out, i, 2, TT_COLON_EQUAL);
+					LexData_AddSpecialChar(Out, i, 2, TT_COLON_EQUAL);
 					++i;
 				}
 				else
-					AddSpecialCharToken(Out, i, 1, TT_COLON);
+					LexData_AddSpecialChar(Out, i, 1, TT_COLON);
 				break;
 			case ',':
-				AddSpecialCharToken(Out, i, 1, TT_COMMA);
+				LexData_AddSpecialChar(Out, i, 1, TT_COMMA);
 				break;
 			default:
 				LogProgErr(Data, i, "unhandled character - '%c'!", Data->Data[i]);
@@ -710,8 +779,100 @@ Lex(struct LexData *Out, struct FileData const *Data)
 static int
 LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 {
-	// TODO: implement.
-	return 1;
+	size_t Lb = *i;
+	
+	char *ChData;
+	size_t ChDataLen;
+	DynStr_Init(&ChData, &ChDataLen);
+	
+	// get character data.
+	{
+		++*i;
+		if (Data->Data[*i] == '\'')
+		{
+			LogProgErr(Data, Lb, "cannot have empty character literals!");
+			free(ChData);
+			return 1;
+		}
+		else if (Data->Data[*i] == '\\')
+		{
+			if (ConvEscSequence(Data->Data, i, &ChData, &ChDataLen))
+			{
+				LogProgErr(Data, Lb, "invalid escape in character - '%c'!", Data->Data[*i + 1]);
+				free(ChData);
+				return 1;
+			}
+		}
+		else
+			DynStr_AppendChar(&ChData, &ChDataLen, Data->Data[*i]);
+		
+		if (Data->Data[*i] != '\'')
+		{
+			LogProgErr(Data, Lb, "cannot have unterminated character literals!");
+			free(ChData);
+			return 1;
+		}
+		++*i;
+	}
+	
+	// get size modifier if present.
+	enum SizeMod SizeMod = SM_8;
+	if (Data->Data[*i] == '\'')
+	{
+		++*i;
+		size_t ModLb = *i;
+		
+		while (isalnum(Data->Data[*i]) || Data->Data[*i] == '_')
+			++*i;
+		
+		if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "32", 2))
+			SizeMod = SM_32;
+		else if (*i - ModLb == 2 && !strncmp(&Data->Data[ModLb], "16", 2))
+			SizeMod = SM_16;
+		else if (*i - ModLb == 1 && !strncmp(&Data->Data[ModLb], "8", 1))
+			SizeMod = SM_8;
+		else
+		{
+			LogProgErr(Data, Lb, "character literal has invalid size modifier!");
+			free(ChData);
+			return 1;
+		}
+	}
+	
+	*Out = (struct Token)
+	{
+		.Data.Int = ChData[0],
+		.Pos = Lb,
+		.Len = *i - Lb,
+		.SizeMod = SizeMod,
+		.Type = TT_LIT_INT
+	};
+	free(ChData);
+	
+	return 0;
+}
+
+static void
+LexData_AddSpecialChar(struct LexData *Out,
+                       size_t Pos,
+                       size_t Len,
+                       enum TokenType Type)
+{
+	struct Token Tok =
+	{
+		.Pos = Pos,
+		.Len = Len,
+		.Type = Type
+	};
+	LexData_AddToken(Out, &Tok);
+}
+
+static void
+LexData_AddToken(struct LexData *Out, struct Token const *Tok)
+{
+	++Out->TokCnt;
+	Out->Toks = reallocarray(Out->Toks, Out->TokCnt, sizeof(struct Token));
+	Out->Toks[Out->TokCnt - 1] = *Tok;
 }
 
 static int
@@ -735,7 +896,7 @@ LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 		{
 			if (ConvEscSequence(Data->Data, i, &StrData, &StrDataLen))
 			{
-				LogProgErr(Data, Lb, "invalid escape character in string - '%c'!", Data->Data[*i + 1]);
+				LogProgErr(Data, Lb, "invalid escape in string - '%c'!", Data->Data[*i + 1]);
 				free(StrData);
 				return 1;
 			}
@@ -984,6 +1145,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		"Uint32",
 		"Uint64",
 		"Usize",
+		"Var",
 		"VargCount",
 		"While"
 	};
@@ -1016,14 +1178,30 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		}
 	}
 	
-	*Out = (struct Token)
+	// output token, accounting for keyword literals.
 	{
-		.Data.Str.Text = Word,
-		.Data.Str.Len = *i - Lb,
-		.Pos = Lb,
-		.Len = *i - Lb,
-		.Type = Type
-	};
+		if (Type == TT_KW_TRUE || Type == TT_KW_FALSE)
+		{
+			*Out = (struct Token)
+			{
+				.Data.Bool = Type == TT_KW_TRUE,
+				.Pos = Lb,
+				.Len = *i - Lb,
+				.Type = TT_LIT_BOOL
+			};
+		}
+		else
+		{
+			*Out = (struct Token)
+			{
+				.Data.Str.Text = Word,
+				.Data.Str.Len = *i - Lb,
+				.Pos = Lb,
+				.Len = *i - Lb,
+				.Type = Type
+			};
+		}
+	}
 	
 	return 0;
 }
@@ -1091,6 +1269,81 @@ LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...)
 		
 		fprintf(stderr, "\x1b[31m^\x1b[0m\n");
 	}
+}
+
+static void
+LogTokErr(struct FileData const *Data,
+          struct Token const *Tok,
+          char const *Fmt,
+          ...)
+{
+	// write out error message.
+	{
+		va_list Args;
+		va_start(Args, Fmt);
+		
+		fprintf(stderr, "%s \x1b[31merr\x1b[0m: ", Data->Name);
+		vfprintf(stderr, Fmt, Args);
+		fprintf(stderr, "\n");
+		
+		va_end(Args);
+	}
+	
+	// write out line and error position indicator
+	{
+		size_t Begin = Tok->Pos;
+		while (Begin > 0 && Data->Data[Begin - 1] != '\n')
+			--Begin;
+		
+		size_t End = Tok->Pos;
+		while (End < Data->Len && Data->Data[End] != '\n')
+			++End;
+		
+		fprintf(stderr,
+		        "\x1b[2m[line %zu (byte %zu)]\n"
+		        "\\->\x1b[0m ",
+		        LineNumber(Data->Data, Tok->Pos),
+		        Tok->Pos);
+		
+		for (size_t i = Begin; i < End; ++i)
+			fprintf(stderr, "%c", Data->Data[i] == '\t' ? ' ' : Data->Data[i]);
+		
+		fprintf(stderr, "\n    ");
+		
+		for (size_t i = Begin; i < Tok->Pos; ++i)
+			fprintf(stderr, " ");
+		
+		fprintf(stderr, "\x1b[31m^\x1b[0m\n");
+	}
+}
+
+static void
+Node_AddChild(struct Node *Node, struct Node const *Child)
+{
+	++Node->ChildCnt;
+	Node->Children = reallocarray(Node->Children, Node->ChildCnt, sizeof(struct Node));
+	Node->Children[Node->ChildCnt - 1] = *Child;
+}
+
+static void
+Node_AddToken(struct Node *Node, struct Token const *Tok)
+{
+	++Node->TokCnt;
+	Node->Toks = reallocarray(Node->Toks, Node->TokCnt, sizeof(struct Token *));
+	Node->Toks[Node->TokCnt - 1] = Tok;
+}
+
+static void
+Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
+{
+	// TODO: implement.
+}
+
+static int
+Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex)
+{
+	// TODO: implement.
+	return 1;
 }
 
 static unsigned
@@ -1212,6 +1465,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_KW_UINT32",
 		"TT_KW_UINT64",
 		"TT_KW_USIZE",
+		"TT_KW_VAR",
 		"TT_KW_VARGCOUNT",
 		"TT_KW_WHILE",
 		

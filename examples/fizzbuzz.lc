@@ -1,7 +1,7 @@
 Import C.Stdio
 
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
-	i: Int32 Mut := 0
+	Var i: Int32 Mut := 0
 	While i < 100
 		FizzBuzz(i)
 		++i
@@ -11,7 +11,7 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 End
 
 Proc FizzBuzz(n: Int32)
-	Printed: Bool Mut := False
+	Var Printed: Bool Mut := False
 
 	If n % 3 == 0
 		printf("fizz")
