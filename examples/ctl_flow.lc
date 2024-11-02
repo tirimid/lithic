@@ -30,6 +30,8 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 			DoSomething()
 		Case 1, 0, -1
 			DoSomething()
+		Base
+			DoSomething()
 	End
 
 	; return statement.

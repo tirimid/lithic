@@ -33,6 +33,7 @@ enum TokenType
 	// keywords.
 	TT_KW_FIRST__,
 	TT_KW_AS = TT_KW_FIRST__,
+	TT_KW_BASE,
 	TT_KW_BLOCK,
 	TT_KW_BOOL,
 	TT_KW_BREAK,
@@ -41,6 +42,7 @@ enum TokenType
 	TT_KW_ELIF,
 	TT_KW_ELSE,
 	TT_KW_END,
+	TT_KW_ENUM,
 	TT_KW_FALSE,
 	TT_KW_FLOAT32,
 	TT_KW_FLOAT64,
@@ -66,6 +68,7 @@ enum TokenType
 	TT_KW_UINT16,
 	TT_KW_UINT32,
 	TT_KW_UINT64,
+	TT_KW_UNION,
 	TT_KW_USIZE,
 	TT_KW_VAR,
 	TT_KW_VARGCOUNT,
@@ -82,6 +85,7 @@ enum TokenType
 	TT_DOUBLE_MINUS,
 	TT_AT,
 	TT_CARET,
+	TT_TRIPLE_PERIOD,
 	TT_PERIOD,
 	TT_MINUS,
 	TT_BANG,
@@ -122,7 +126,7 @@ enum TokenType
 
 enum NodeType
 {
-	NT_ROOT = 0,
+	NT_PROGRAM = 0,
 	
 	// expression nodes.
 	NT_EXPR,
@@ -176,7 +180,32 @@ enum NodeType
 	NT_EXPR_SHL_ASSIGN,
 	NT_EXPR_BIT_AND_ASSIGN,
 	NT_EXPR_BIT_XOR_ASSIGN,
-	NT_EXPR_BIT_OR_ASSIGN
+	NT_EXPR_BIT_OR_ASSIGN,
+	
+	// type nodes.
+	NT_TYPE,
+	NT_TYPE_ATOM,
+	NT_TYPE_PTR,
+	NT_TYPE_PROC,
+	NT_TYPE_ARRAY,
+	NT_TYPE_BUFFER,
+	
+	// language structure nodes.
+	NT_IMPORT,
+	NT_PROC,
+	NT_VAR,
+	NT_COND_TREE,
+	NT_WHILE,
+	NT_BREAK,
+	NT_CONTINUE,
+	NT_BLOCK,
+	NT_SWITCH,
+	NT_CASE,
+	NT_RETURN,
+	NT_RESET_VARGS,
+	NT_STRUCT,
+	NT_ENUM,
+	NT_UNION
 };
 
 enum NodeFlag
@@ -244,7 +273,15 @@ struct Node
 	struct Node *Children;
 	size_t ChildCnt;
 	
+	unsigned long Flags;
 	unsigned char Type;
+};
+
+struct ParseState
+{
+	struct FileData const *File;
+	struct LexData const *Lex;
+	size_t i;
 };
 
 static int Conf_Read(int Argc, char const *Argv[]);
@@ -252,12 +289,15 @@ static void Conf_Quit(void);
 static int ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len);
 static void DynStr_AppendChar(char **Str, size_t *Len, char Ch);
 static void DynStr_Init(char **Str, size_t *Len);
+static struct Token const *ExpectToken(struct ParseState *Ps, enum TokenType Type);
+static void FileData_Destroy(struct FileData *Data);
 static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
 static int LexChar(struct FileData const *Data, struct Token *Out, size_t *i);
 static void LexData_AddSpecialChar(struct LexData *Out, size_t Pos, size_t Len, enum TokenType Type);
 static void LexData_AddToken(struct LexData *Out, struct Token const *Tok);
+static void LexData_Destroy(struct LexData *Data);
 static int LexString(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexNum(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexWord(struct FileData const *Data, struct Token *Out, size_t *i);
@@ -265,14 +305,27 @@ static size_t LineNumber(char const *Str, size_t Pos);
 static void LogErr(char const *Fmt, ...);
 static void LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...);
 static void LogTokErr(struct FileData const *Data, struct Token const *Tok, char const *Fmt, ...);
+static struct Token const *NextToken(struct ParseState *Ps);
 static void Node_AddChild(struct Node *Node, struct Node const *Child);
 static void Node_AddToken(struct Node *Node, struct Token const *Tok);
+static void Node_Destroy(struct Node *Node);
 static void Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth);
+static char const *NodeType_Name(enum NodeType Type);
 static int Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex);
+static int ParseEnum(struct Node *Out, struct ParseState *Ps);
+static int ParseImport(struct Node *Out, struct ParseState *Ps);
+static int ParseProc(struct Node *Out, struct ParseState *Ps);
+static int ParseProgram(struct Node *Out, struct ParseState *Ps);
+static int ParseStruct(struct Node *Out, struct ParseState *Ps);
+static int ParseUnion(struct Node *Out, struct ParseState *Ps);
+static int ParseVar(struct Node *Out, struct ParseState *Ps);
+static struct Token const *PeekToken(struct ParseState const *Ps);
 static unsigned SizeModBits(enum SizeMod Mod);
 static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
+static void Token_Destroy(struct Token *Tok);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
+static char const *TokenType_Name(enum TokenType Type);
 static void Usage(char const *Name);
 
 static struct StrNumLimit StrNumLimits[] =
@@ -311,30 +364,48 @@ main(int Argc, char const *Argv[])
 	if (FileData_Read(&FileData, Conf.InFp, Conf.InFile))
 		return 1;
 	
+	int Rc = 0;
+	
 	struct LexData LexData = {0};
 	if (Lex(&LexData, &FileData))
-		return 1;
+	{
+		Rc = 1;
+		goto ExitFileData;
+	}
 	
 	if (Conf.DumpToks)
 	{
 		for (size_t i = 0; i < LexData.TokCnt; ++i)
 			Token_Print(Conf.OutFp, &LexData.Toks[i], i);
-		return 0;
+		goto ExitLexData;
 	}
 	
 	struct Node Ast = {0};
 	if (Parse(&Ast, &FileData, &LexData))
-		return 1;
+	{
+		Rc = 1;
+		goto ExitLexData;
+	}
 	
 	if (Conf.DumpAst)
 	{
 		Node_Print(Conf.OutFp, &Ast, 0);
-		return 0;
+		goto ExitAst;
 	}
 	
 	// TODO: implement rest.
 	
-	return 0;
+	// cleanup.
+	{
+	ExitAst:
+		Node_Destroy(&Ast);
+	ExitLexData:
+		LexData_Destroy(&LexData);
+	ExitFileData:
+		FileData_Destroy(&FileData);
+	}
+	
+	return Rc;
 }
 
 static int
@@ -485,6 +556,35 @@ DynStr_Init(char **Str, size_t *Len)
 	*Len = 0;
 }
 
+static struct Token const *
+ExpectToken(struct ParseState *Ps, enum TokenType Type)
+{
+	struct Token const *Tok = NextToken(Ps);
+	if (!Tok)
+	{
+		LogTokErr(Ps->File, Tok, "expected %s at end of file, found nothing!", TokenType_Name(Type));
+		return NULL;
+	}
+	
+	if (Tok->Type != Type)
+	{
+		LogTokErr(Ps->File, Tok, "expected %s, found %s!", TokenType_Name(Type), TokenType_Name(Tok->Type));
+		return NULL;
+	}
+	
+	return Tok;
+}
+
+static void
+FileData_Destroy(struct FileData *Data)
+{
+	// free allocated memory.
+	{
+		free(Data->Name);
+		free(Data->Data);
+	}
+}
+
 static int
 FileData_Read(struct FileData *Out, FILE *Fp, char const *File)
 {
@@ -608,6 +708,11 @@ Lex(struct LexData *Out, struct FileData const *Data)
 					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_PLUS);
 					++i;
 				}
+				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "+=", 2))
+				{
+					LexData_AddSpecialChar(Out, i, 2, TT_PLUS_EQUAL);
+					++i;
+				}
 				else
 					LexData_AddSpecialChar(Out, i, 1, TT_PLUS);
 				break;
@@ -615,6 +720,11 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "--", 2))
 				{
 					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_MINUS);
+					++i;
+				}
+				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "-=", 2))
+				{
+					LexData_AddSpecialChar(Out, i, 2, TT_MINUS_EQUAL);
 					++i;
 				}
 				else
@@ -633,7 +743,13 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				LexData_AddSpecialChar(Out, i, 1, TT_CARET);
 				break;
 			case '.':
-				LexData_AddSpecialChar(Out, i, 1, TT_PERIOD);
+				if (i + 2 < Data->Len && !strncmp(&Data->Data[i], "...", 3))
+				{
+					LexData_AddSpecialChar(Out, i, 3, TT_TRIPLE_PERIOD);
+					i += 2;
+				}
+				else
+					LexData_AddSpecialChar(Out, i, 1, TT_PERIOD);
 				break;
 			case '!':
 				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "!=", 2))
@@ -875,6 +991,14 @@ LexData_AddToken(struct LexData *Out, struct Token const *Tok)
 	Out->Toks[Out->TokCnt - 1] = *Tok;
 }
 
+static void
+LexData_Destroy(struct LexData *Data)
+{
+	for (size_t i = 0; i < Data->TokCnt; ++i)
+		Token_Destroy(&Data->Toks[i]);
+	free(Data->Toks);
+}
+
 static int
 LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 {
@@ -1111,6 +1235,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	static char const *Keywords[] =
 	{
 		"As",
+		"Base",
 		"Block",
 		"Bool",
 		"Break",
@@ -1119,6 +1244,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		"Elif",
 		"Else",
 		"End",
+		"Enum",
 		"False",
 		"Float32",
 		"Float64",
@@ -1144,6 +1270,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		"Uint16",
 		"Uint32",
 		"Uint64",
+		"Union",
 		"Usize",
 		"Var",
 		"VargCount",
@@ -1182,12 +1309,23 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	{
 		if (Type == TT_KW_TRUE || Type == TT_KW_FALSE)
 		{
+			free(Word);
 			*Out = (struct Token)
 			{
 				.Data.Bool = Type == TT_KW_TRUE,
 				.Pos = Lb,
 				.Len = *i - Lb,
 				.Type = TT_LIT_BOOL
+			};
+		}
+		else if (Type >= TT_KW_FIRST__ && Type <= TT_KW_LAST__)
+		{
+			free(Word);
+			*Out = (struct Token)
+			{
+				.Pos = Lb,
+				.Len = *i - Lb,
+				.Type = Type,
 			};
 		}
 		else
@@ -1317,6 +1455,14 @@ LogTokErr(struct FileData const *Data,
 	}
 }
 
+static struct Token const *
+NextToken(struct ParseState *Ps)
+{
+	++Ps->i;
+	struct Token const *Tok = Ps->i >= Ps->Lex->TokCnt ? NULL : &Ps->Lex->Toks[Ps->i];
+	return Tok;
+}
+
 static void
 Node_AddChild(struct Node *Node, struct Node const *Child)
 {
@@ -1334,16 +1480,338 @@ Node_AddToken(struct Node *Node, struct Token const *Tok)
 }
 
 static void
+Node_Destroy(struct Node *Node)
+{
+	for (size_t i = 0; i < Node->ChildCnt; ++i)
+		Node_Destroy(&Node->Children[i]);
+	
+	// free allocated memory if needed.
+	{
+		if (Node->Toks)
+			free(Node->Toks);
+		
+		if (Node->Children)
+			free(Node->Children);
+	}
+}
+
+static void
 Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 {
-	// TODO: implement.
+	// print out node.
+	{
+		for (unsigned i = 0; i < Depth; ++i)
+			fprintf(Fp, "  ");
+		
+		fprintf(Fp,
+		        "%s (%c%c)\n",
+		        NodeType_Name(Node->Type),
+		        Node->Flags & NF_PUBLIC ? 'P' : '-',
+		        Node->Flags & NF_EXTERN ? 'E' : '-');
+		
+		for (size_t i = 0; i < Node->TokCnt; ++i)
+		{
+			for (unsigned j = 0; j < Depth; ++j)
+				fprintf(Fp, "  ");
+			Token_Print(Fp, Node->Toks[i], i);
+		}
+	}
+	
+	// print out children.
+	{
+		for (size_t i = 0; i < Node->ChildCnt; ++i)
+			Node_Print(Fp, &Node->Children[i], Depth + 1);
+	}
+}
+
+static char const *
+NodeType_Name(enum NodeType Type)
+{
+	static char const *Names[] =
+	{
+		"NT_PROGRAM",
+		
+		// expression nodes.
+		"NT_EXPR",
+		"NT_EXPR_ATOM",
+		"NT_EXPR_LENOF",
+		"NT_EXPR_NEXTVARG",
+		"NT_EXPR_LAMBDA",
+		"NT_EXPR_SIZEOF",
+		"NT_EXPR_STRUCT",
+		"NT_EXPR_VARGCOUNT",
+		"NT_EXPR_POST_INC",
+		"NT_EXPR_POST_DEC",
+		"NT_EXPR_CALL",
+		"NT_EXPR_NTH",
+		"NT_EXPR_DEREF",
+		"NT_EXPR_ACCESS",
+		"NT_EXPR_CAST",
+		"NT_EXPR_PRE_INC",
+		"NT_EXPR_PRE_DEC",
+		"NT_EXPR_UNARY_MINUS",
+		"NT_EXPR_LOG_NOT",
+		"NT_EXPR_BIT_NOT",
+		"NT_EXPR_ADDR_OF",
+		"NT_EXPR_MUL",
+		"NT_EXPR_DIV",
+		"NT_EXPR_MOD",
+		"NT_EXPR_ADD",
+		"NT_EXPR_SUB",
+		"NT_EXPR_SHR",
+		"NT_EXPR_SHL",
+		"NT_EXPR_BIT_AND",
+		"NT_EXPR_BIT_XOR",
+		"NT_EXPR_BIT_OR",
+		"NT_EXPR_GREATER",
+		"NT_EXPR_GREQUAL",
+		"NT_EXPR_LESS",
+		"NT_EXPR_LEQUAL",
+		"NT_EXPR_EQUAL",
+		"NT_EXPR_NEQUAL",
+		"NT_EXPR_LOG_AND",
+		"NT_EXPR_LOG_XOR",
+		"NT_EXPR_LOG_OR",
+		"NT_EXPR_TERNARY",
+		"NT_EXPR_ASSIGN",
+		"NT_EXPR_ADD_ASSIGN",
+		"NT_EXPR_SUB_ASSIGN",
+		"NT_EXPR_MUL_ASSIGN",
+		"NT_EXPR_DIV_ASSIGN",
+		"NT_EXPR_MOD_ASSIGN",
+		"NT_EXPR_SHR_ASSIGN",
+		"NT_EXPR_SHL_ASSIGN",
+		"NT_EXPR_BIT_AND_ASSIGN",
+		"NT_EXPR_BIT_XOR_ASSIGN",
+		"NT_EXPR_BIT_OR_ASSIGN",
+		
+		// type nodes.
+		"NT_TYPE",
+		"NT_TYPE_ATOM",
+		"NT_TYPE_PTR",
+		"NT_TYPE_PROC",
+		"NT_TYPE_ARRAY",
+		"NT_TYPE_BUFFER",
+		
+		// language structure nodes.
+		"NT_IMPORT",
+		"NT_PROC",
+		"NT_VAR",
+		"NT_COND_TREE",
+		"NT_WHILE",
+		"NT_BREAK",
+		"NT_CONTINUE",
+		"NT_BLOCK",
+		"NT_SWITCH",
+		"NT_CASE",
+		"NT_RETURN",
+		"NT_RESET_VARGS",
+		"NT_STRUCT",
+		"NT_ENUM",
+		"NT_UNION"
+	};
+	
+	return Names[Type];
 }
 
 static int
 Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex)
 {
+	if (Lex->TokCnt == 0)
+	{
+		LogErr("cannot parse empty program!");
+		return 1;
+	}
+	
+	struct ParseState Ps =
+	{
+		.File = File,
+		.Lex = Lex,
+		.i = -1,
+	};
+	
+	if (ParseProgram(Out, &Ps))
+		return 1;
+	
+	return 0;
+}
+
+static int
+ParseEnum(struct Node *Out, struct ParseState *Ps)
+{
 	// TODO: implement.
 	return 1;
+}
+
+static int
+ParseImport(struct Node *Out, struct ParseState *Ps)
+{
+	struct Token const *Import = ExpectToken(Ps, TT_KW_IMPORT);
+	if (!Import)
+		return 1;
+	
+	for (;;)
+	{
+		struct Token const *Target = ExpectToken(Ps, TT_IDENT);
+		if (!Target)
+		{
+			Node_Destroy(Out);
+			return 1;
+		}
+		
+		struct Token const *Tok = NextToken(Ps);
+		if (!Tok)
+		{
+			LogTokErr(Ps->File, Target, "expected TT_PERIOD or TT_NEWLINE after target!");
+			Node_Destroy(Out);
+			return 1;
+		}
+		
+		switch (Tok->Type)
+		{
+		case TT_PERIOD:
+			Node_AddToken(Out, Target);
+			break;
+		case TT_NEWLINE:
+			Node_AddToken(Out, Target);
+			goto Done;
+		default:
+			LogTokErr(Ps->File, Tok, "expected TT_PERIOD or TT_NEWLINE!");
+			Node_Destroy(Out);
+			return 1;
+		}
+	}
+Done:
+	
+	Out->Type = NT_IMPORT;
+	
+	return 0;
+}
+
+static int
+ParseProc(struct Node *Out, struct ParseState *Ps)
+{
+	// TODO: implement.
+	return 1;
+}
+
+static int
+ParseProgram(struct Node *Out, struct ParseState *Ps)
+{
+	for (;;)
+	{
+		struct Token const *Tok = PeekToken(Ps);
+		if (!Tok)
+			break;
+		
+		switch (Tok->Type)
+		{
+		case TT_KW_IMPORT:
+		{
+			struct Node Child = {0};
+			if (ParseImport(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_PROC:
+		{
+			struct Node Child = {0};
+			if (ParseProc(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_VAR:
+		{
+			struct Node Child = {0};
+			if (ParseVar(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_STRUCT:
+		{
+			struct Node Child = {0};
+			if (ParseStruct(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_ENUM:
+		{
+			struct Node Child = {0};
+			if (ParseEnum(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_UNION:
+		{
+			struct Node Child = {0};
+			if (ParseUnion(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_NEWLINE:
+			++Ps->i;
+			break;
+		default:
+			LogTokErr(Ps->File, Tok, "expected global scope element!");
+			Node_Destroy(Out);
+			return 1;
+		}
+	}
+	
+	Out->Type = NT_PROGRAM;
+	
+	return 0;
+}
+
+static int
+ParseStruct(struct Node *Out, struct ParseState *Ps)
+{
+	// TODO: implement.
+	return 1;
+}
+
+static int
+ParseUnion(struct Node *Out, struct ParseState *Ps)
+{
+	// TODO: implement.
+	return 1;
+}
+
+static int
+ParseVar(struct Node *Out, struct ParseState *Ps)
+{
+	// TODO: implement.
+	return 1;
+}
+
+static struct Token const *
+PeekToken(struct ParseState const *Ps)
+{
+	return Ps->i + 1 >= Ps->Lex->TokCnt ? NULL : &Ps->Lex->Toks[Ps->i + 1];
 }
 
 static unsigned
@@ -1417,7 +1885,48 @@ Substr(char const *Str, size_t Lb, size_t Ub)
 }
 
 static void
+Token_Destroy(struct Token *Tok)
+{
+	switch (Tok->Type)
+	{
+	case TT_IDENT:
+	case TT_LIT_STR:
+		free(Tok->Data.Str.Text);
+		break;
+	default:
+		break;
+	}
+}
+
+static void
 Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
+{
+	fprintf(Fp, "[%zu] [%zu+%zu]:%s", Ind, Tok->Pos, Tok->Len, TokenType_Name(Tok->Type));
+	switch (Tok->Type)
+	{
+	case TT_IDENT:
+		fprintf(Fp, " %s", Tok->Data.Str.Text);
+		break;
+	case TT_LIT_STR:
+		fprintf(Fp, " S%d:%s", SizeModBits(Tok->SizeMod), Tok->Data.Str.Text);
+		break;
+	case TT_LIT_INT:
+		fprintf(Fp, " S%d:%lu", SizeModBits(Tok->SizeMod), Tok->Data.Int);
+		break;
+	case TT_LIT_FLOAT:
+		fprintf(Fp, " S%d:%f", SizeModBits(Tok->SizeMod), Tok->Data.Float);
+		break;
+	case TT_LIT_BOOL:
+		fprintf(Fp, " %s", Tok->Data.Bool ? "True" : "False");
+		break;
+	default:
+		break;
+	}
+	fprintf(Fp, "\n");
+}
+
+static char const *
+TokenType_Name(enum TokenType Type)
 {
 	static char const *Names[] =
 	{
@@ -1431,6 +1940,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		
 		// keywords.
 		"TT_KW_AS",
+		"TT_KW_BASE",
 		"TT_KW_BLOCK",
 		"TT_KW_BOOL",
 		"TT_KW_BREAK",
@@ -1439,6 +1949,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_KW_ELIF",
 		"TT_KW_ELSE",
 		"TT_KW_END",
+		"TT_KW_ENUM",
 		"TT_KW_FALSE",
 		"TT_KW_FLOAT32",
 		"TT_KW_FLOAT64",
@@ -1464,6 +1975,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_KW_UINT16",
 		"TT_KW_UINT32",
 		"TT_KW_UINT64",
+		"TT_KW_UNION",
 		"TT_KW_USIZE",
 		"TT_KW_VAR",
 		"TT_KW_VARGCOUNT",
@@ -1479,6 +1991,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_DOUBLE_MINUS",
 		"TT_AT",
 		"TT_CARET",
+		"TT_TRIPLE_PERIOD",
 		"TT_PERIOD",
 		"TT_MINUS",
 		"TT_BANG",
@@ -1517,28 +2030,7 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		"TT_COMMA"
 	};
 	
-	fprintf(Fp, "[%zu] [%zu+%zu]:%s", Ind, Tok->Pos, Tok->Len, Names[Tok->Type]);
-	switch (Tok->Type)
-	{
-	case TT_IDENT:
-		fprintf(Fp, " %s", Tok->Data.Str.Text);
-		break;
-	case TT_LIT_STR:
-		fprintf(Fp, " S%d:%s", SizeModBits(Tok->SizeMod), Tok->Data.Str.Text);
-		break;
-	case TT_LIT_INT:
-		fprintf(Fp, " S%d:%lu", SizeModBits(Tok->SizeMod), Tok->Data.Int);
-		break;
-	case TT_LIT_FLOAT:
-		fprintf(Fp, " S%d:%f", SizeModBits(Tok->SizeMod), Tok->Data.Float);
-		break;
-	case TT_LIT_BOOL:
-		fprintf(Fp, " %s", Tok->Data.Bool ? "True" : "False");
-		break;
-	default:
-		break;
-	}
-	fprintf(Fp, "\n");
+	return Names[Type];
 }
 
 static void
