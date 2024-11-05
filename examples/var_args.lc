@@ -7,9 +7,9 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	PrintAll()
 
 	; test var arg addition using `MulAdd()`.
-	printf("%d", MulAdd(2, 1, 2, 3))
-	printf("%d", MulAdd(3, 2, 2, 2))
-	printf("%d", MulAdd(0))
+	printf(Base "%d", MulAdd(2, 1, 2, 3))
+	printf(Base "%d", MulAdd(3, 2, 2, 2))
+	printf(Base "%d", MulAdd(0))
 
 	Return 0
 End
@@ -17,7 +17,7 @@ End
 Proc PrintAll(...)
 	Var i: Usize Mut := 0's
 	While i < VargCount
-		printf("%s ", NextVarg[Uint8^])
+		printf(Base "%s ", NextVarg[Uint8^])
 		++i
 	End
 
@@ -39,4 +39,12 @@ Proc MulAdd(Mul: Int32, ...): Int32
 	End
 
 	Return Sum
+End
+
+; this function will have its variadic arguments passed in the same way as a C
+; function, without a count, meaning you must have an argument prior to them and
+; cannot use `VargCount` within the function.
+; this should be used for creating interfaces to external C functions.
+Proc CVarArgs(Something: Int32, Base ...)
+	; do something.
 End

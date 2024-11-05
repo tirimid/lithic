@@ -1,4 +1,4 @@
-; LithiC supports the following operators in expressions:
+; lithic supports the following operators in expressions:
 ;
 ; [***]---------------------------- ;
 ; Proc		lambda expression ;
@@ -11,7 +11,7 @@
 ; --			post decrement    ;
 ; ()			function call     ;
 ; @			get nth element   ;
-; ^			dereference       ;
+; ^			address-of        ;
 ; .			element access    ;
 ; As			type cast         ;
 ; [RTL]---------------------------- ;
@@ -20,7 +20,7 @@
 ; -			unary minus       ;
 ; !			logical NOT       ;
 ; ~			bitwise NOT       ;
-; &			address-of        ;
+; ^			dereferenc        ;
 ; [LTR]---------------------------- ;
 ; *			multiplication    ;
 ; /			division          ;

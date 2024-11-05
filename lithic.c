@@ -43,6 +43,8 @@ enum TokenType
 	TT_KW_ELSE,
 	TT_KW_END,
 	TT_KW_ENUM,
+	TT_KW_EXTERNPROC,
+	TT_KW_EXTERNVAR,
 	TT_KW_FALSE,
 	TT_KW_FLOAT32,
 	TT_KW_FLOAT64,
@@ -57,6 +59,7 @@ enum TokenType
 	TT_KW_MUT,
 	TT_KW_NEXTVARG,
 	TT_KW_NULL,
+	TT_KW_POINTER,
 	TT_KW_PROC,
 	TT_KW_RESETVARGS,
 	TT_KW_RETURN,
@@ -1245,6 +1248,8 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		"Else",
 		"End",
 		"Enum",
+		"ExternProc",
+		"ExternVar",
 		"False",
 		"Float32",
 		"Float64",
@@ -1259,6 +1264,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 		"Mut",
 		"NextVarg",
 		"Null",
+		"Pointer",
 		"Proc",
 		"ResetVargs",
 		"Return",
@@ -1650,6 +1656,13 @@ ParseImport(struct Node *Out, struct ParseState *Ps)
 	if (!Import)
 		return 1;
 	
+	struct Token const *Vis = PeekToken(Ps);
+	if (Vis && Vis->Type == TT_ASTERISK)
+	{
+		Out->Flags |= NF_PUBLIC;
+		++Ps->i;
+	}
+	
 	for (;;)
 	{
 		struct Token const *Target = ExpectToken(Ps, TT_IDENT);
@@ -1718,6 +1731,7 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 			break;
 		}
 		case TT_KW_PROC:
+		case TT_KW_EXTERNPROC:
 		{
 			struct Node Child = {0};
 			if (ParseProc(&Child, Ps))
@@ -1729,6 +1743,7 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 			break;
 		}
 		case TT_KW_VAR:
+		case TT_KW_EXTERNVAR:
 		{
 			struct Node Child = {0};
 			if (ParseVar(&Child, Ps))
@@ -1950,6 +1965,8 @@ TokenType_Name(enum TokenType Type)
 		"TT_KW_ELSE",
 		"TT_KW_END",
 		"TT_KW_ENUM",
+		"TT_KW_EXTERNPROC",
+		"TT_KW_EXTERNVAR",
 		"TT_KW_FALSE",
 		"TT_KW_FLOAT32",
 		"TT_KW_FLOAT64",
@@ -1964,6 +1981,7 @@ TokenType_Name(enum TokenType Type)
 		"TT_KW_MUT",
 		"TT_KW_NEXTVARG",
 		"TT_KW_NULL",
+		"TT_KW_POINTER",
 		"TT_KW_PROC",
 		"TT_KW_RESETVARGS",
 		"TT_KW_RETURN",

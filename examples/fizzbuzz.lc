@@ -14,18 +14,18 @@ Proc FizzBuzz(n: Int32)
 	Var Printed: Bool Mut := False
 
 	If n % 3 == 0
-		printf("fizz")
+		printf(Base "fizz")
 		Printed := True
 	End
 
 	If n % 5 == 0
-		printf("buzz")
+		printf(Base "buzz")
 		Printed := True
 	End
 
 	If !printed
-		printf("%d", n)
+		printf(Base "%d", n)
 	End
 
-	printf("\n");
+	printf(Base "\n")
 End
