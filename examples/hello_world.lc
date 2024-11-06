@@ -1,7 +1,6 @@
-; instead of importing C standard IO, manually define an external printf symbol.
-ExternProc printf(Uint8^, Base ...): Int32
+Import Std.Io
 
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
-	printf(Base "hello world\n")
+	Print("hello world\n")
 	Return 0 ; implicit `'32` on untyped integer literals.
 End

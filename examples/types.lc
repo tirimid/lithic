@@ -11,7 +11,11 @@
 ; * Bool		boolean true/false value
 ; * Float32		single precision floating point value
 ; * Float64		double precision floating point value
-; * Pointer		byte pointer that is implicitly cast to any other pointer type
 ;
 ; and the following modifiers:
-; TODO: document modifiers.
+;
+; * ^			pointer
+; * []		sized array
+; * Base[]		C style array
+; * ()		function pointer
+; * Mut		mutability modifier

@@ -59,7 +59,7 @@ enum TokenType
 	TT_KW_MUT,
 	TT_KW_NEXTVARG,
 	TT_KW_NULL,
-	TT_KW_POINTER,
+	TT_KW_OPAQUETYPE,
 	TT_KW_PROC,
 	TT_KW_RESETVARGS,
 	TT_KW_RETURN,
@@ -67,6 +67,7 @@ enum TokenType
 	TT_KW_STRUCT,
 	TT_KW_SWITCH,
 	TT_KW_TRUE,
+	TT_KW_TYPEALIAS,
 	TT_KW_UINT8,
 	TT_KW_UINT16,
 	TT_KW_UINT32,
@@ -140,6 +141,7 @@ enum NodeType
 	NT_EXPR_SIZEOF,
 	NT_EXPR_STRUCT,
 	NT_EXPR_VARGCOUNT,
+	NT_EXPR_NULL,
 	NT_EXPR_POST_INC,
 	NT_EXPR_POST_DEC,
 	NT_EXPR_CALL,
@@ -208,13 +210,23 @@ enum NodeType
 	NT_RESET_VARGS,
 	NT_STRUCT,
 	NT_ENUM,
-	NT_UNION
+	NT_UNION,
+	NT_TYPE_ALIAS,
+	NT_OPAQUE_TYPE
 };
 
 enum NodeFlag
 {
 	NF_PUBLIC = 0x1,
-	NF_EXTERN = 0x2
+	NF_EXTERN = 0x2,
+	NF_MUT = 0x4
+};
+
+enum ConfFlag
+{
+	CF_DUMP_TOKS = 0x1,
+	CF_DUMP_AST = 0x2,
+	CF_NO_FLOAT = 0x4
 };
 
 struct Conf
@@ -225,7 +237,7 @@ struct Conf
 	char const *OutFile;
 	FILE *OutFp;
 	
-	bool DumpToks, DumpAst;
+	unsigned long Flags;
 };
 
 struct FileData
@@ -287,6 +299,11 @@ struct ParseState
 	size_t i;
 };
 
+struct BindPower
+{
+	int Left, Right;
+};
+
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
 static int ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len);
@@ -313,13 +330,14 @@ static void Node_AddChild(struct Node *Node, struct Node const *Child);
 static void Node_AddToken(struct Node *Node, struct Token const *Tok);
 static void Node_Destroy(struct Node *Node);
 static void Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth);
-static char const *NodeType_Name(enum NodeType Type);
 static int Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex);
 static int ParseEnum(struct Node *Out, struct ParseState *Ps);
 static int ParseImport(struct Node *Out, struct ParseState *Ps);
+static int ParseOpaqueType(struct Node *Out, struct ParseState *Ps);
 static int ParseProc(struct Node *Out, struct ParseState *Ps);
 static int ParseProgram(struct Node *Out, struct ParseState *Ps);
 static int ParseStruct(struct Node *Out, struct ParseState *Ps);
+static int ParseTypeAlias(struct Node *Out, struct ParseState *Ps);
 static int ParseUnion(struct Node *Out, struct ParseState *Ps);
 static int ParseVar(struct Node *Out, struct ParseState *Ps);
 static struct Token const *PeekToken(struct ParseState const *Ps);
@@ -328,7 +346,6 @@ static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Destroy(struct Token *Tok);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
-static char const *TokenType_Name(enum TokenType Type);
 static void Usage(char const *Name);
 
 static struct StrNumLimit StrNumLimits[] =
@@ -355,6 +372,335 @@ static struct StrNumLimit StrNumLimits[] =
 	{"ffffffffffffffff", 16, 16, SM_SIZE}
 };
 
+static char const *Keywords[] =
+{
+	"As",
+	"Base",
+	"Block",
+	"Bool",
+	"Break",
+	"Case",
+	"Continue",
+	"Elif",
+	"Else",
+	"End",
+	"Enum",
+	"ExternProc",
+	"ExternVar",
+	"False",
+	"Float32",
+	"Float64",
+	"If",
+	"Import",
+	"Int8",
+	"Int16",
+	"Int32",
+	"Int64",
+	"Isize",
+	"LenOf",
+	"Mut",
+	"NextVarg",
+	"Null",
+	"OpaqueType",
+	"Proc",
+	"ResetVargs",
+	"Return",
+	"SizeOf",
+	"Struct",
+	"Switch",
+	"True",
+	"TypeAlias",
+	"Uint8",
+	"Uint16",
+	"Uint32",
+	"Uint64",
+	"Union",
+	"Usize",
+	"Var",
+	"VargCount",
+	"While"
+};
+
+static char const *TokenTypeNames[] =
+{
+	"TT_IDENT",
+	
+	// literals.
+	"TT_LIT_STR",
+	"TT_LIT_INT",
+	"TT_LIT_FLOAT",
+	"TT_LIT_BOOL",
+	
+	// keywords.
+	"TT_KW_AS",
+	"TT_KW_BASE",
+	"TT_KW_BLOCK",
+	"TT_KW_BOOL",
+	"TT_KW_BREAK",
+	"TT_KW_CASE",
+	"TT_KW_CONTINUE",
+	"TT_KW_ELIF",
+	"TT_KW_ELSE",
+	"TT_KW_END",
+	"TT_KW_ENUM",
+	"TT_KW_EXTERNPROC",
+	"TT_KW_EXTERNVAR",
+	"TT_KW_FALSE",
+	"TT_KW_FLOAT32",
+	"TT_KW_FLOAT64",
+	"TT_KW_IF",
+	"TT_KW_IMPORT",
+	"TT_KW_INT8",
+	"TT_KW_INT16",
+	"TT_KW_INT32",
+	"TT_KW_INT64",
+	"TT_KW_ISIZE",
+	"TT_KW_LENOF",
+	"TT_KW_MUT",
+	"TT_KW_NEXTVARG",
+	"TT_KW_NULL",
+	"TT_KW_OPAQUETYPE",
+	"TT_KW_PROC",
+	"TT_KW_RESETVARGS",
+	"TT_KW_RETURN",
+	"TT_KW_SIZEOF",
+	"TT_KW_STRUCT",
+	"TT_KW_SWITCH",
+	"TT_KW_TRUE",
+	"TT_KW_TYPEALIAS",
+	"TT_KW_UINT8",
+	"TT_KW_UINT16",
+	"TT_KW_UINT32",
+	"TT_KW_UINT64",
+	"TT_KW_UNION",
+	"TT_KW_USIZE",
+	"TT_KW_VAR",
+	"TT_KW_VARGCOUNT",
+	"TT_KW_WHILE",
+	
+	// special characters.
+	"TT_NEWLINE",
+	"TT_PBEGIN",
+	"TT_PEND",
+	"TT_BKBEGIN",
+	"TT_BKEND",
+	"TT_DOUBLE_PLUS",
+	"TT_DOUBLE_MINUS",
+	"TT_AT",
+	"TT_CARET",
+	"TT_TRIPLE_PERIOD",
+	"TT_PERIOD",
+	"TT_MINUS",
+	"TT_BANG",
+	"TT_TILDE",
+	"TT_AMPERSAND",
+	"TT_ASTERISK",
+	"TT_SLASH",
+	"TT_PERCENT",
+	"TT_PLUS",
+	"TT_DOUBLE_GREATER",
+	"TT_DOUBLE_LESS",
+	"TT_PIPE",
+	"TT_GREATER",
+	"TT_GREQUAL",
+	"TT_LESS",
+	"TT_LEQUAL",
+	"TT_DOUBLE_EQUAL",
+	"TT_BANG_EQUAL",
+	"TT_DOUBLE_AMPERSAND",
+	"TT_DOUBLE_TILDE",
+	"TT_DOUBLE_PIPE",
+	"TT_QUESTION",
+	"TT_COLON",
+	"TT_COLON_EQUAL",
+	"TT_PLUS_EQUAL",
+	"TT_MINUS_EQUAL",
+	"TT_ASTERISK_EQUAL",
+	"TT_SLASH_EQUAL",
+	"TT_PERCENT_EQUAL",
+	"TT_DOUBLE_GREATER_ASSIGN",
+	"TT_DOUBLE_LESS_ASSIGN",
+	"TT_AMPERSAND_ASSIGN",
+	"TT_TILDE_ASSIGN",
+	"TT_PIPE_ASSIGN",
+	"TT_AT_QUOTE",
+	"TT_COMMA"
+};
+
+static char const *NodeTypeNames[] =
+{
+	"NT_PROGRAM",
+	
+	// expression nodes.
+	"NT_EXPR",
+	"NT_EXPR_ATOM",
+	"NT_EXPR_LENOF",
+	"NT_EXPR_NEXTVARG",
+	"NT_EXPR_LAMBDA",
+	"NT_EXPR_SIZEOF",
+	"NT_EXPR_STRUCT",
+	"NT_EXPR_VARGCOUNT",
+	"NT_EXPR_NULL",
+	"NT_EXPR_POST_INC",
+	"NT_EXPR_POST_DEC",
+	"NT_EXPR_CALL",
+	"NT_EXPR_NTH",
+	"NT_EXPR_DEREF",
+	"NT_EXPR_ACCESS",
+	"NT_EXPR_CAST",
+	"NT_EXPR_PRE_INC",
+	"NT_EXPR_PRE_DEC",
+	"NT_EXPR_UNARY_MINUS",
+	"NT_EXPR_LOG_NOT",
+	"NT_EXPR_BIT_NOT",
+	"NT_EXPR_ADDR_OF",
+	"NT_EXPR_MUL",
+	"NT_EXPR_DIV",
+	"NT_EXPR_MOD",
+	"NT_EXPR_ADD",
+	"NT_EXPR_SUB",
+	"NT_EXPR_SHR",
+	"NT_EXPR_SHL",
+	"NT_EXPR_BIT_AND",
+	"NT_EXPR_BIT_XOR",
+	"NT_EXPR_BIT_OR",
+	"NT_EXPR_GREATER",
+	"NT_EXPR_GREQUAL",
+	"NT_EXPR_LESS",
+	"NT_EXPR_LEQUAL",
+	"NT_EXPR_EQUAL",
+	"NT_EXPR_NEQUAL",
+	"NT_EXPR_LOG_AND",
+	"NT_EXPR_LOG_XOR",
+	"NT_EXPR_LOG_OR",
+	"NT_EXPR_TERNARY",
+	"NT_EXPR_ASSIGN",
+	"NT_EXPR_ADD_ASSIGN",
+	"NT_EXPR_SUB_ASSIGN",
+	"NT_EXPR_MUL_ASSIGN",
+	"NT_EXPR_DIV_ASSIGN",
+	"NT_EXPR_MOD_ASSIGN",
+	"NT_EXPR_SHR_ASSIGN",
+	"NT_EXPR_SHL_ASSIGN",
+	"NT_EXPR_BIT_AND_ASSIGN",
+	"NT_EXPR_BIT_XOR_ASSIGN",
+	"NT_EXPR_BIT_OR_ASSIGN",
+	
+	// type nodes.
+	"NT_TYPE",
+	"NT_TYPE_ATOM",
+	"NT_TYPE_PTR",
+	"NT_TYPE_PROC",
+	"NT_TYPE_ARRAY",
+	"NT_TYPE_BUFFER",
+	
+	// language structure nodes.
+	"NT_IMPORT",
+	"NT_PROC",
+	"NT_VAR",
+	"NT_COND_TREE",
+	"NT_WHILE",
+	"NT_BREAK",
+	"NT_CONTINUE",
+	"NT_BLOCK",
+	"NT_SWITCH",
+	"NT_CASE",
+	"NT_RETURN",
+	"NT_RESET_VARGS",
+	"NT_STRUCT",
+	"NT_ENUM",
+	"NT_UNION",
+	"NT_TYPE_ALIAS",
+	"NT_OPAQUE_TYPE"
+};
+
+static struct BindPower ExprBindPower[] =
+{
+	{0}, // dummy entry.
+	
+	// first types have their own parsing schemes.
+	{0},
+	{0},
+	{0},
+	{0},
+	{0},
+	{0},
+	{0},
+	{0},
+	
+	// precedence group 14.
+	{27, 28}, // ++
+	{27, 28}, // --
+	{27, 28}, // ()
+	{27, 28}, // @
+	{27, 28}, // ^
+	{27, 28}, // .
+	{27, 28}, // As
+	
+	// precedence group 13.
+	{26, 25}, // ++
+	{26, 25}, // --
+	{26, 25}, // -
+	{26, 25}, // !
+	{26, 25}, // ~
+	{26, 25}, // ^
+	
+	// precedence group 12.
+	{23, 24}, // *
+	{23, 24}, // /
+	{23, 24}, // %
+	
+	// precedence group 11.
+	{21, 22}, // +
+	{21, 22}, // -
+	
+	// precedence group 10.
+	{19, 20}, // <<
+	{19, 20}, // >>
+	
+	// precedence group 9.
+	{17, 18}, // &
+	
+	// precedence group 8.
+	{15, 16}, // ~
+	
+	// precedence group 7.
+	{13, 14}, // |
+	
+	// precedence group 6.
+	{11, 12}, // >
+	{11, 12}, // >=
+	{11, 12}, // <
+	{11, 12}, // <=
+	{11, 12}, // ==
+	{11, 12}, // !=
+	
+	// precedence group 5.
+	{9, 10}, // &&
+	
+	// precedence group 4.
+	{7, 8}, // ~~
+	
+	// precedence group 3.
+	{5, 6}, // ||
+	
+	// precedence group 2.
+	{4, 3}, // ?
+	
+	// precedence group 1.
+	{2, 1}, // :=
+	{2, 1}, // +=
+	{2, 1}, // -=
+	{2, 1}, // *=
+	{2, 1}, // /=
+	{2, 1}, // %=
+	{2, 1}, // >>=
+	{2, 1}, // <<=
+	{2, 1}, // &=
+	{2, 1}, // ~=
+	{2, 1} // |=
+};
+
 static struct Conf Conf;
 
 int
@@ -376,7 +722,7 @@ main(int Argc, char const *Argv[])
 		goto ExitFileData;
 	}
 	
-	if (Conf.DumpToks)
+	if (Conf.Flags & CF_DUMP_TOKS)
 	{
 		for (size_t i = 0; i < LexData.TokCnt; ++i)
 			Token_Print(Conf.OutFp, &LexData.Toks[i], i);
@@ -390,7 +736,7 @@ main(int Argc, char const *Argv[])
 		goto ExitLexData;
 	}
 	
-	if (Conf.DumpAst)
+	if (Conf.Flags & CF_DUMP_AST)
 	{
 		Node_Print(Conf.OutFp, &Ast, 0);
 		goto ExitAst;
@@ -418,18 +764,27 @@ Conf_Read(int Argc, char const *Argv[])
 	
 	// get option arguments.
 	int c;
-	while ((c = getopt(Argc, (char *const *)Argv, "AhLo:")) != -1)
+	while ((c = getopt(Argc, (char *const *)Argv, "Ac:hLo:")) != -1)
 	{
 		switch (c)
 		{
 		case 'A':
-			Conf.DumpAst = true;
+			Conf.Flags |= CF_DUMP_AST;
+			break;
+		case 'c':
+			if (!strcmp(optarg, "no-float"))
+				Conf.Flags |= CF_NO_FLOAT;
+			else
+			{
+				LogErr("unrecognized option - '%s'!", optarg);
+				return 1;
+			}
 			break;
 		case 'h':
 			Usage(Argv[0]);
 			exit(0);
 		case 'L':
-			Conf.DumpToks = true;
+			Conf.Flags |= CF_DUMP_TOKS;
 			break;
 		case 'o':
 			if (Conf.OutFp)
@@ -565,13 +920,13 @@ ExpectToken(struct ParseState *Ps, enum TokenType Type)
 	struct Token const *Tok = NextToken(Ps);
 	if (!Tok)
 	{
-		LogTokErr(Ps->File, Tok, "expected %s at end of file, found nothing!", TokenType_Name(Type));
+		LogTokErr(Ps->File, Tok, "expected %s at end of file, found nothing!", TokenTypeNames[Type]);
 		return NULL;
 	}
 	
 	if (Tok->Type != Type)
 	{
-		LogTokErr(Ps->File, Tok, "expected %s, found %s!", TokenType_Name(Type), TokenType_Name(Tok->Type));
+		LogTokErr(Ps->File, Tok, "expected %s, found %s!", TokenTypeNames[Type], TokenTypeNames[Tok->Type]);
 		return NULL;
 	}
 	
@@ -1235,54 +1590,6 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 static int
 LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 {
-	static char const *Keywords[] =
-	{
-		"As",
-		"Base",
-		"Block",
-		"Bool",
-		"Break",
-		"Case",
-		"Continue",
-		"Elif",
-		"Else",
-		"End",
-		"Enum",
-		"ExternProc",
-		"ExternVar",
-		"False",
-		"Float32",
-		"Float64",
-		"If",
-		"Import",
-		"Int8",
-		"Int16",
-		"Int32",
-		"Int64",
-		"Isize",
-		"LenOf",
-		"Mut",
-		"NextVarg",
-		"Null",
-		"Pointer",
-		"Proc",
-		"ResetVargs",
-		"Return",
-		"SizeOf",
-		"Struct",
-		"Switch",
-		"True",
-		"Uint8",
-		"Uint16",
-		"Uint32",
-		"Uint64",
-		"Union",
-		"Usize",
-		"Var",
-		"VargCount",
-		"While"
-	};
-	
 	bool IsRaw = Data->Data[*i] == '@';
 	*i += IsRaw;
 	size_t Lb = *i;
@@ -1510,10 +1817,11 @@ Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 			fprintf(Fp, "  ");
 		
 		fprintf(Fp,
-		        "%s (%c%c)\n",
-		        NodeType_Name(Node->Type),
+		        "%s (%c%c%c)\n",
+		        NodeTypeNames[Node->Type],
 		        Node->Flags & NF_PUBLIC ? 'P' : '-',
-		        Node->Flags & NF_EXTERN ? 'E' : '-');
+		        Node->Flags & NF_EXTERN ? 'E' : '-',
+		        Node->Flags & NF_MUT ? 'M' : '-');
 		
 		for (size_t i = 0; i < Node->TokCnt; ++i)
 		{
@@ -1528,96 +1836,6 @@ Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 		for (size_t i = 0; i < Node->ChildCnt; ++i)
 			Node_Print(Fp, &Node->Children[i], Depth + 1);
 	}
-}
-
-static char const *
-NodeType_Name(enum NodeType Type)
-{
-	static char const *Names[] =
-	{
-		"NT_PROGRAM",
-		
-		// expression nodes.
-		"NT_EXPR",
-		"NT_EXPR_ATOM",
-		"NT_EXPR_LENOF",
-		"NT_EXPR_NEXTVARG",
-		"NT_EXPR_LAMBDA",
-		"NT_EXPR_SIZEOF",
-		"NT_EXPR_STRUCT",
-		"NT_EXPR_VARGCOUNT",
-		"NT_EXPR_POST_INC",
-		"NT_EXPR_POST_DEC",
-		"NT_EXPR_CALL",
-		"NT_EXPR_NTH",
-		"NT_EXPR_DEREF",
-		"NT_EXPR_ACCESS",
-		"NT_EXPR_CAST",
-		"NT_EXPR_PRE_INC",
-		"NT_EXPR_PRE_DEC",
-		"NT_EXPR_UNARY_MINUS",
-		"NT_EXPR_LOG_NOT",
-		"NT_EXPR_BIT_NOT",
-		"NT_EXPR_ADDR_OF",
-		"NT_EXPR_MUL",
-		"NT_EXPR_DIV",
-		"NT_EXPR_MOD",
-		"NT_EXPR_ADD",
-		"NT_EXPR_SUB",
-		"NT_EXPR_SHR",
-		"NT_EXPR_SHL",
-		"NT_EXPR_BIT_AND",
-		"NT_EXPR_BIT_XOR",
-		"NT_EXPR_BIT_OR",
-		"NT_EXPR_GREATER",
-		"NT_EXPR_GREQUAL",
-		"NT_EXPR_LESS",
-		"NT_EXPR_LEQUAL",
-		"NT_EXPR_EQUAL",
-		"NT_EXPR_NEQUAL",
-		"NT_EXPR_LOG_AND",
-		"NT_EXPR_LOG_XOR",
-		"NT_EXPR_LOG_OR",
-		"NT_EXPR_TERNARY",
-		"NT_EXPR_ASSIGN",
-		"NT_EXPR_ADD_ASSIGN",
-		"NT_EXPR_SUB_ASSIGN",
-		"NT_EXPR_MUL_ASSIGN",
-		"NT_EXPR_DIV_ASSIGN",
-		"NT_EXPR_MOD_ASSIGN",
-		"NT_EXPR_SHR_ASSIGN",
-		"NT_EXPR_SHL_ASSIGN",
-		"NT_EXPR_BIT_AND_ASSIGN",
-		"NT_EXPR_BIT_XOR_ASSIGN",
-		"NT_EXPR_BIT_OR_ASSIGN",
-		
-		// type nodes.
-		"NT_TYPE",
-		"NT_TYPE_ATOM",
-		"NT_TYPE_PTR",
-		"NT_TYPE_PROC",
-		"NT_TYPE_ARRAY",
-		"NT_TYPE_BUFFER",
-		
-		// language structure nodes.
-		"NT_IMPORT",
-		"NT_PROC",
-		"NT_VAR",
-		"NT_COND_TREE",
-		"NT_WHILE",
-		"NT_BREAK",
-		"NT_CONTINUE",
-		"NT_BLOCK",
-		"NT_SWITCH",
-		"NT_CASE",
-		"NT_RETURN",
-		"NT_RESET_VARGS",
-		"NT_STRUCT",
-		"NT_ENUM",
-		"NT_UNION"
-	};
-	
-	return Names[Type];
 }
 
 static int
@@ -1697,6 +1915,30 @@ ParseImport(struct Node *Out, struct ParseState *Ps)
 Done:
 	
 	Out->Type = NT_IMPORT;
+	
+	return 0;
+}
+
+static int
+ParseOpaqueType(struct Node *Out, struct ParseState *Ps)
+{
+	struct Token const *OpaqueType = ExpectToken(Ps, TT_KW_OPAQUETYPE);
+	if (!OpaqueType)
+		return 1;
+	
+	struct Token const *Vis = PeekToken(Ps);
+	if (Vis && Vis->Type == TT_ASTERISK)
+	{
+		Out->Flags |= NF_PUBLIC;
+		++Ps->i;
+	}
+	
+	struct Token const *Ident = ExpectToken(Ps, TT_IDENT);
+	if (!Ident)
+		return 1;
+	
+	Node_AddToken(Out, Ident);
+	Out->Type = NT_OPAQUE_TYPE;
 	
 	return 0;
 }
@@ -1787,6 +2029,28 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 			Node_AddChild(Out, &Child);
 			break;
 		}
+		case TT_KW_TYPEALIAS:
+		{
+			struct Node Child = {0};
+			if (ParseTypeAlias(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
+		case TT_KW_OPAQUETYPE:
+		{
+			struct Node Child = {0};
+			if (ParseOpaqueType(&Child, Ps))
+			{
+				Node_Destroy(Out);
+				return 1;
+			}
+			Node_AddChild(Out, &Child);
+			break;
+		}
 		case TT_NEWLINE:
 			++Ps->i;
 			break;
@@ -1804,6 +2068,13 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 
 static int
 ParseStruct(struct Node *Out, struct ParseState *Ps)
+{
+	// TODO: implement.
+	return 1;
+}
+
+static int
+ParseTypeAlias(struct Node *Out, struct ParseState *Ps)
 {
 	// TODO: implement.
 	return 1;
@@ -1916,7 +2187,7 @@ Token_Destroy(struct Token *Tok)
 static void
 Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 {
-	fprintf(Fp, "[%zu] [%zu+%zu]:%s", Ind, Tok->Pos, Tok->Len, TokenType_Name(Tok->Type));
+	fprintf(Fp, "[%zu] [%zu+%zu]:%s", Ind, Tok->Pos, Tok->Len, TokenTypeNames[Tok->Type]);
 	switch (Tok->Type)
 	{
 	case TT_IDENT:
@@ -1940,117 +2211,6 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 	fprintf(Fp, "\n");
 }
 
-static char const *
-TokenType_Name(enum TokenType Type)
-{
-	static char const *Names[] =
-	{
-		"TT_IDENT",
-		
-		// literals.
-		"TT_LIT_STR",
-		"TT_LIT_INT",
-		"TT_LIT_FLOAT",
-		"TT_LIT_BOOL",
-		
-		// keywords.
-		"TT_KW_AS",
-		"TT_KW_BASE",
-		"TT_KW_BLOCK",
-		"TT_KW_BOOL",
-		"TT_KW_BREAK",
-		"TT_KW_CASE",
-		"TT_KW_CONTINUE",
-		"TT_KW_ELIF",
-		"TT_KW_ELSE",
-		"TT_KW_END",
-		"TT_KW_ENUM",
-		"TT_KW_EXTERNPROC",
-		"TT_KW_EXTERNVAR",
-		"TT_KW_FALSE",
-		"TT_KW_FLOAT32",
-		"TT_KW_FLOAT64",
-		"TT_KW_IF",
-		"TT_KW_IMPORT",
-		"TT_KW_INT8",
-		"TT_KW_INT16",
-		"TT_KW_INT32",
-		"TT_KW_INT64",
-		"TT_KW_ISIZE",
-		"TT_KW_LENOF",
-		"TT_KW_MUT",
-		"TT_KW_NEXTVARG",
-		"TT_KW_NULL",
-		"TT_KW_POINTER",
-		"TT_KW_PROC",
-		"TT_KW_RESETVARGS",
-		"TT_KW_RETURN",
-		"TT_KW_SIZEOF",
-		"TT_KW_STRUCT",
-		"TT_KW_SWITCH",
-		"TT_KW_TRUE",
-		"TT_KW_UINT8",
-		"TT_KW_UINT16",
-		"TT_KW_UINT32",
-		"TT_KW_UINT64",
-		"TT_KW_UNION",
-		"TT_KW_USIZE",
-		"TT_KW_VAR",
-		"TT_KW_VARGCOUNT",
-		"TT_KW_WHILE",
-		
-		// special characters.
-		"TT_NEWLINE",
-		"TT_PBEGIN",
-		"TT_PEND",
-		"TT_BKBEGIN",
-		"TT_BKEND",
-		"TT_DOUBLE_PLUS",
-		"TT_DOUBLE_MINUS",
-		"TT_AT",
-		"TT_CARET",
-		"TT_TRIPLE_PERIOD",
-		"TT_PERIOD",
-		"TT_MINUS",
-		"TT_BANG",
-		"TT_TILDE",
-		"TT_AMPERSAND",
-		"TT_ASTERISK",
-		"TT_SLASH",
-		"TT_PERCENT",
-		"TT_PLUS",
-		"TT_DOUBLE_GREATER",
-		"TT_DOUBLE_LESS",
-		"TT_PIPE",
-		"TT_GREATER",
-		"TT_GREQUAL",
-		"TT_LESS",
-		"TT_LEQUAL",
-		"TT_DOUBLE_EQUAL",
-		"TT_BANG_EQUAL",
-		"TT_DOUBLE_AMPERSAND",
-		"TT_DOUBLE_TILDE",
-		"TT_DOUBLE_PIPE",
-		"TT_QUESTION",
-		"TT_COLON",
-		"TT_COLON_EQUAL",
-		"TT_PLUS_EQUAL",
-		"TT_MINUS_EQUAL",
-		"TT_ASTERISK_EQUAL",
-		"TT_SLASH_EQUAL",
-		"TT_PERCENT_EQUAL",
-		"TT_DOUBLE_GREATER_ASSIGN",
-		"TT_DOUBLE_LESS_ASSIGN",
-		"TT_AMPERSAND_ASSIGN",
-		"TT_TILDE_ASSIGN",
-		"TT_PIPE_ASSIGN",
-		"TT_AT_QUOTE",
-		"TT_COMMA"
-	};
-	
-	return Names[Type];
-}
-
 static void
 Usage(char const *Name)
 {
@@ -2064,8 +2224,9 @@ Usage(char const *Name)
 	       "\n"
 	       "options:\n"
 	       "\t-A       dump the parsed out AST\n"
+	       "\t-c flag  specify a language / transpiler flag\n"
 	       "\t-h       display this help text\n"
-	       "\t-o file  write output to the specified file\n"
-	       "\t-L       dump the lexed tokens\n",
+	       "\t-L       dump the lexed tokens\n"
+	       "\t-o file  write output to the specified file\n",
 	       Name);
 }

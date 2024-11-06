@@ -1,4 +1,4 @@
-Import C.Stdio
+Import Std.Io
 
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Var i: Int32 Mut := 0
@@ -14,18 +14,18 @@ Proc FizzBuzz(n: Int32)
 	Var Printed: Bool Mut := False
 
 	If n % 3 == 0
-		printf(Base "fizz")
+		Print("fizz")
 		Printed := True
 	End
 
 	If n % 5 == 0
-		printf(Base "buzz")
+		Print("buzz")
 		Printed := True
 	End
 
-	If !printed
-		printf(Base "%d", n)
+	If !Printed
+		Print("{i}", n)
 	End
 
-	printf(Base "\n")
+	Print("\n")
 End

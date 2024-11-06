@@ -1,4 +1,4 @@
-Import C.Stdio
+Import Std.Io
 
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	; test var arg print using `PrintAll()`.
@@ -7,9 +7,9 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	PrintAll()
 
 	; test var arg addition using `MulAdd()`.
-	printf(Base "%d", MulAdd(2, 1, 2, 3))
-	printf(Base "%d", MulAdd(3, 2, 2, 2))
-	printf(Base "%d", MulAdd(0))
+	Print("{i}\n", MulAdd(2, 1, 2, 3))
+	Print("{i}\n", MulAdd(3, 2, 2, 2))
+	Print("{i}\n", MulAdd(0))
 
 	Return 0
 End
@@ -17,11 +17,10 @@ End
 Proc PrintAll(...)
 	Var i: Usize Mut := 0's
 	While i < VargCount
-		printf(Base "%s ", NextVarg[Uint8^])
+		Print("{s} ", NextVarg[Uint8[]])
 		++i
 	End
-
-	printf("\n")
+	Print("\n")
 End
 
 Proc MulAdd(Mul: Int32, ...): Int32

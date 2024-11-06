@@ -1,0 +1,78 @@
+; must be derived from an integer type.
+Enum VecType: Uint8
+	Vec2 := 2
+
+	Vec3 ; automatically increments to 3.
+	Vec4 ; 4.
+End
+
+Struct Vec2
+	x: Float32
+	y: Float32
+End
+
+Struct Vec3
+	x: Float32
+	y: Float32
+	z: Float32
+End
+
+Struct Vec4
+	x: Float32
+	y: Float32
+	z: Float32
+	w: Float32
+End
+
+; opaque types can be defined like this.
+; they should be used when interfacing with C code.
+; an opaque type can only be used modified with a pointer.
+OpaqueType OpaqueVec
+
+Union VecN
+	; typenames are not stored in the same namespace as everything else.
+	; as such, you can name variables with the same name as their type.
+	Vec2: Vec2
+	Vec3: Vec3
+	Vec4: Vec4
+End
+
+Struct Vec
+	Data: VecN
+	Type: VecType
+End
+
+; example method-style function.
+; can be invoked using `SomeVec.Add(SomeOtherVec)`.
+Proc Add[Vec](Rhs: Vec): Vec
+	If Self.Type != Rhs.Type
+		Return Null[Vec]
+	End
+
+	Var Out: Vec Mut := Struct Vec
+		.Type := Self.Type
+	End
+
+	Switch Self.Type
+		Case VecType.Vec2
+			Out.x := Self.x + Rhs.x
+			Out.y := Self.y + Rhs.y
+		Case VecType.Vec3
+			Out.x := Self.x + Rhs.x
+			Out.y := Self.y + Rhs.y
+			Out.z := Self.z + Rhs.z
+		Case VecType.Vec4
+			Out.x := Self.x + Rhs.x
+			Out.y := Self.y + Rhs.y
+			Out.z := Self.z + Rhs.z
+			Out.w := Self.w + Rhs.w
+		Base
+	End
+
+	Return Out
+End
+
+; can be invoked using `SomeVec.AddAssign(SomeOtherVec)`.
+Proc AddAssign[Vec Mut](Rhs: Vec)
+	Self = Self.Add(Rhs)
+End
