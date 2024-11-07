@@ -1,0 +1,37 @@
+Struct *Vec3
+	x: Float32
+	y: Float32
+	z: Float32
+End
+
+Proc *FastRSqrt(f: Float32): Float32
+	; TODO: implement.
+End
+
+Proc *Vec3.Add(Self, Rhs: Vec3): Vec3
+	; TODO: implement.
+End
+
+Proc *Vec3.Cross(Self, Rhs: Vec3): Vec3
+	; TODO: implement.
+End
+
+Proc *Vec3.Div(Self, Rhs: Vec3): Vec3
+	; TODO: implement.
+End
+
+Proc *Vec3.Dot(Self, Rhs: Vec3): Float32
+	; TODO: implement.
+End
+
+Proc *Vec3.Magnitude(Self): Float32
+	; TODO: implement.
+End
+
+Proc *Vec3.Mul(Self, Rhs: Vec3): Vec3
+	; TODO: implement.
+End
+
+Proc *Vec3.Sub(Self, Rhs: Vec3): Vec3
+	; TODO: implement.
+End

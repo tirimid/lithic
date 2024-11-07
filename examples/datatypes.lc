@@ -42,9 +42,9 @@ Struct Vec
 	Type: VecType
 End
 
-; example method-style function.
+; example method-style procedure.
 ; can be invoked using `SomeVec.Add(SomeOtherVec)`.
-Proc Add[Vec](Rhs: Vec): Vec
+Proc Vec.Add(Self, Rhs: Vec): Vec
 	If Self.Type != Rhs.Type
 		Return Null[Vec]
 	End
@@ -55,17 +55,17 @@ Proc Add[Vec](Rhs: Vec): Vec
 
 	Switch Self.Type
 		Case VecType.Vec2
-			Out.x := Self.x + Rhs.x
-			Out.y := Self.y + Rhs.y
+			Out.Data.Vec2.x := Self.Data.Vec2.x + Rhs.Data.Vec2.x
+			Out.Data.Vec2.y := Self.Data.Vec2.y + Rhs.Data.Vec2.y
 		Case VecType.Vec3
-			Out.x := Self.x + Rhs.x
-			Out.y := Self.y + Rhs.y
-			Out.z := Self.z + Rhs.z
+			Out.Data.Vec3.x := Self.Data.Vec3.x + Rhs.Data.Vec3.x
+			Out.Data.Vec3.y := Self.Data.Vec3.y + Rhs.Data.Vec3.y
+			Out.Data.Vec3.z := Self.Data.Vec3.z + Rhs.Data.Vec3.z
 		Case VecType.Vec4
-			Out.x := Self.x + Rhs.x
-			Out.y := Self.y + Rhs.y
-			Out.z := Self.z + Rhs.z
-			Out.w := Self.w + Rhs.w
+			Out.Data.Vec4.x := Self.Data.Vec4.x + Rhs.Data.Vec4.x
+			Out.Data.Vec4.y := Self.Data.Vec4.y + Rhs.Data.Vec4.y
+			Out.Data.Vec4.z := Self.Data.Vec4.z + Rhs.Data.Vec4.z
+			Out.Data.Vec4.w := Self.Data.Vec4.w + Rhs.Data.Vec4.w
 		Base
 	End
 
@@ -73,6 +73,41 @@ Proc Add[Vec](Rhs: Vec): Vec
 End
 
 ; can be invoked using `SomeVec.AddAssign(SomeOtherVec)`.
-Proc AddAssign[Vec Mut](Rhs: Vec)
-	Self = Self.Add(Rhs)
+Proc Vec.AddAssign(Self Mut*, Rhs: Vec)
+	*Self := Self.^.Add(Rhs)
+End
+
+; equivalent of static methods.
+Proc Vec.Create(Val: Float32)
+	Return Struct Vec( \
+		.Type := VecType.Vec4, \
+		.Data.Vec4 := Struct Vec4( \
+			.x := Val, \
+			.y := Val, \
+			.z := Val, \
+			.w := Val \
+		) \
+	)
+End
+
+; method-style procedures can be declared in the following ways:
+;
+; * with no `Self` argument.
+; * with a `Self` first argument.
+; * with a `Self Mut` first argument.
+; * with a `Self*` first argument.
+; * with a `Self* Mut` first argument.
+; * with a `Self Mut*` first argument.
+; * with a `Self Mut* Mut` first argument.
+;
+; method-style procedures declared with `Self Mut*` can only be called on
+; variables whose types are marked with `Mut`.
+
+Proc NullStructures()
+	Var Vec: Vec := Null[Vec]
+	If Vec == Null[Vec]
+		; `Vec` is fully zeroed.
+	Else
+		; `Vec` is nonzero.
+	End
 End

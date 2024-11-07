@@ -10,6 +10,8 @@
 #include <getopt.h>
 #include <unistd.h>
 
+#define MAX_MODULE_PATHS 32
+
 enum SizeMod
 {
 	SM_NULL = 0,
@@ -63,6 +65,7 @@ enum TokenType
 	TT_KW_PROC,
 	TT_KW_RESETVARGS,
 	TT_KW_RETURN,
+	TT_KW_SELF,
 	TT_KW_SIZEOF,
 	TT_KW_STRUCT,
 	TT_KW_SWITCH,
@@ -91,6 +94,7 @@ enum TokenType
 	TT_CARET,
 	TT_TRIPLE_PERIOD,
 	TT_PERIOD,
+	TT_PERIOD_CARET_PERIOD,
 	TT_MINUS,
 	TT_BANG,
 	TT_TILDE,
@@ -135,6 +139,7 @@ enum NodeType
 	// expression nodes.
 	NT_EXPR,
 	NT_EXPR_ATOM,
+	NT_EXPR_LIST,
 	NT_EXPR_LENOF,
 	NT_EXPR_NEXTVARG,
 	NT_EXPR_LAMBDA,
@@ -149,6 +154,7 @@ enum NodeType
 	NT_EXPR_DEREF,
 	NT_EXPR_ACCESS,
 	NT_EXPR_CAST,
+	NT_EXPR_DEREF_ACCESS,
 	NT_EXPR_PRE_INC,
 	NT_EXPR_PRE_DEC,
 	NT_EXPR_UNARY_MINUS,
@@ -236,6 +242,9 @@ struct Conf
 	
 	char const *OutFile;
 	FILE *OutFp;
+	
+	char const *ModulePaths[MAX_MODULE_PATHS];
+	size_t ModulePathCnt;
 	
 	unsigned long Flags;
 };
@@ -405,6 +414,7 @@ static char const *Keywords[] =
 	"Proc",
 	"ResetVargs",
 	"Return",
+	"Self",
 	"SizeOf",
 	"Struct",
 	"Switch",
@@ -463,6 +473,7 @@ static char const *TokenTypeNames[] =
 	"TT_KW_PROC",
 	"TT_KW_RESETVARGS",
 	"TT_KW_RETURN",
+	"TT_KW_SELF",
 	"TT_KW_SIZEOF",
 	"TT_KW_STRUCT",
 	"TT_KW_SWITCH",
@@ -490,6 +501,7 @@ static char const *TokenTypeNames[] =
 	"TT_CARET",
 	"TT_TRIPLE_PERIOD",
 	"TT_PERIOD",
+	"TT_PERIOD_CARET_PERIOD",
 	"TT_MINUS",
 	"TT_BANG",
 	"TT_TILDE",
@@ -534,6 +546,7 @@ static char const *NodeTypeNames[] =
 	// expression nodes.
 	"NT_EXPR",
 	"NT_EXPR_ATOM",
+	"NT_EXPR_LIST",
 	"NT_EXPR_LENOF",
 	"NT_EXPR_NEXTVARG",
 	"NT_EXPR_LAMBDA",
@@ -548,6 +561,7 @@ static char const *NodeTypeNames[] =
 	"NT_EXPR_DEREF",
 	"NT_EXPR_ACCESS",
 	"NT_EXPR_CAST",
+	"NT_EXPR_DEREF_ACCESS",
 	"NT_EXPR_PRE_INC",
 	"NT_EXPR_PRE_DEC",
 	"NT_EXPR_UNARY_MINUS",
@@ -627,6 +641,7 @@ static struct BindPower ExprBindPower[] =
 	{0},
 	{0},
 	{0},
+	{0},
 	
 	// precedence group 14.
 	{27, 28}, // ++
@@ -636,6 +651,7 @@ static struct BindPower ExprBindPower[] =
 	{27, 28}, // ^
 	{27, 28}, // .
 	{27, 28}, // As
+	{27, 28}, // .^.
 	
 	// precedence group 13.
 	{26, 25}, // ++
@@ -764,7 +780,7 @@ Conf_Read(int Argc, char const *Argv[])
 	
 	// get option arguments.
 	int c;
-	while ((c = getopt(Argc, (char *const *)Argv, "Ac:hLo:")) != -1)
+	while ((c = getopt(Argc, (char *const *)Argv, "Ac:hI:Lo:")) != -1)
 	{
 		switch (c)
 		{
@@ -783,6 +799,19 @@ Conf_Read(int Argc, char const *Argv[])
 		case 'h':
 			Usage(Argv[0]);
 			exit(0);
+		case 'I':
+			if (Conf.ModulePathCnt >= MAX_MODULE_PATHS)
+			{
+				LogErr("cannot add more than %d module search paths!", MAX_MODULE_PATHS);
+				return 1;
+			}
+			
+			Conf.ModulePaths[Conf.ModulePathCnt] = optarg;
+			++Conf.ModulePathCnt;
+			
+			// TODO: verify that directory can be opened.
+			
+			break;
 		case 'L':
 			Conf.Flags |= CF_DUMP_TOKS;
 			break;
@@ -1104,6 +1133,11 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				if (i + 2 < Data->Len && !strncmp(&Data->Data[i], "...", 3))
 				{
 					LexData_AddSpecialChar(Out, i, 3, TT_TRIPLE_PERIOD);
+					i += 2;
+				}
+				else if (i + 2 < Data->Len && !strncmp(&Data->Data[i], ".^.", 3))
+				{
+					LexData_AddSpecialChar(Out, i, 3, TT_PERIOD_CARET_PERIOD);
 					i += 2;
 				}
 				else
@@ -2226,6 +2260,7 @@ Usage(char const *Name)
 	       "\t-A       dump the parsed out AST\n"
 	       "\t-c flag  specify a language / transpiler flag\n"
 	       "\t-h       display this help text\n"
+	       "\t-I dir   add a module search directory\n"
 	       "\t-L       dump the lexed tokens\n"
 	       "\t-o file  write output to the specified file\n",
 	       Name);

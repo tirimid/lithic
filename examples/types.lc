@@ -19,3 +19,8 @@
 ; * Base[]		C style array
 ; * ()		function pointer
 ; * Mut		mutability modifier
+;
+; you can also use these "pseudotypes" (take the position of a type but
+; technically are not actually one):
+;
+; * Self

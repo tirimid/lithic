@@ -1,0 +1,20 @@
+Struct *Allocation
+	Base: Uint8 Mut^
+	Limit: Usize
+End
+
+Proc *AllocMem(Need: Usize): Allocation
+	; TODO: implement.
+End
+
+Proc *FillMem(Base: Uint8 Mut^, Limit: Usize, Byte: Uint8)
+	; TODO: implement.
+End
+
+Proc *FreeMem(Mem: Allocation^)
+	; TODO: implement.
+End
+
+Proc *ZeroMem(Base: Uint8 Mut^, Limit: Usize)
+	; TODO: implement.
+End
