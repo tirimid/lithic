@@ -11,11 +11,11 @@ Proc *FillMem(Base: Uint8 Mut^, Limit: Usize, Byte: Uint8): Null
 	; TODO: implement.
 End
 
-Proc *FreeMem(Mem: Allocation^): Null
+Proc *FreeMem(Mem: Allocation): Null
 	; TODO: implement.
 End
 
-Proc *ReallocMem(Mem: Allocation^): Allocation
+Proc *ReallocMem(Mem: Allocation): Allocation
 	; TODO: implement.
 End
 
