@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <dirent.h>
 #include <getopt.h>
 #include <unistd.h>
 
@@ -150,7 +151,7 @@ enum NodeType
 	NT_EXPR_POST_DEC,
 	NT_EXPR_CALL,
 	NT_EXPR_NTH,
-	NT_EXPR_DEREF,
+	NT_EXPR_ADDR_OF,
 	NT_EXPR_ACCESS,
 	NT_EXPR_CAST,
 	NT_EXPR_DEREF_ACCESS,
@@ -159,7 +160,7 @@ enum NodeType
 	NT_EXPR_UNARY_MINUS,
 	NT_EXPR_LOG_NOT,
 	NT_EXPR_BIT_NOT,
-	NT_EXPR_ADDR_OF,
+	NT_EXPR_DEREF,
 	NT_EXPR_MUL,
 	NT_EXPR_DIV,
 	NT_EXPR_MOD,
@@ -342,6 +343,9 @@ static void Node_Destroy(struct Node *Node);
 static void Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth);
 static int Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex);
 static int ParseEnum(struct Node *Out, struct ParseState *Ps);
+static int ParseExpr(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt, int MinBp);
+static int ParseExprLed(struct Node *Out, struct ParseState *Ps, struct Node const *Lhs, unsigned char const Term[], size_t TermCnt);
+static int ParseExprNud(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseImport(struct Node *Out, struct ParseState *Ps);
 static int ParseProc(struct Node *Out, struct ParseState *Ps);
 static int ParseProgram(struct Node *Out, struct ParseState *Ps);
@@ -350,6 +354,7 @@ static int ParseType(struct Node *Out, struct ParseState *Ps, unsigned char cons
 static int ParseTypeAlias(struct Node *Out, struct ParseState *Ps);
 static int ParseUnion(struct Node *Out, struct ParseState *Ps);
 static int ParseVar(struct Node *Out, struct ParseState *Ps);
+static int ParseWrappedExpr(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseWrappedType(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static struct Token const *PeekToken(struct ParseState const *Ps);
 static struct Token const *RequireToken(struct ParseState *Ps);
@@ -359,6 +364,8 @@ static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Destroy(struct Token *Tok);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
+static enum NodeType TokenTypeToLed(enum TokenType Type);
+static enum NodeType TokenTypeToNud(enum TokenType Type);
 static void Usage(char const *Name);
 
 static struct StrNumLimit StrNumLimits[] =
@@ -760,7 +767,7 @@ main(int Argc, char const *Argv[])
 		goto ExitAst;
 	}
 	
-	// TODO: implement rest.
+	// TODO: implement rest of transpilation process.
 	
 	// cleanup.
 	{
@@ -802,6 +809,7 @@ Conf_Read(int Argc, char const *Argv[])
 			Usage(Argv[0]);
 			exit(0);
 		case 'I':
+		{
 			if (Conf.ModulePathCnt >= MAX_MODULE_PATHS)
 			{
 				LogErr("cannot add more than %d module search paths!", MAX_MODULE_PATHS);
@@ -811,9 +819,16 @@ Conf_Read(int Argc, char const *Argv[])
 			Conf.ModulePaths[Conf.ModulePathCnt] = optarg;
 			++Conf.ModulePathCnt;
 			
-			// TODO: verify that directory can be opened.
+			DIR *Dp = opendir(optarg);
+			if (!Dp)
+			{
+				LogErr("module search path either does not exist or is not a directory - '%s'!", optarg);
+				return 1;
+			}
+			closedir(Dp);
 			
 			break;
+		}
 		case 'L':
 			Conf.Flags |= CF_DUMP_TOKS;
 			break;
@@ -916,11 +931,11 @@ ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len)
 	}
 	else if (!strncmp(&Src[*i], "\\b", 2))
 	{
-		// TODO: implement binary sequences.
+		// TODO: implement string binary sequences.
 	}
 	else if (!strncmp(&Src[*i], "\\x", 2))
 	{
-		// TODO: implement hex sequences.
+		// TODO: implement string hex sequences.
 	}
 	else
 		return 1;
@@ -1863,7 +1878,7 @@ Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 	// print out node.
 	{
 		for (unsigned i = 0; i < Depth; ++i)
-			fprintf(Fp, "  ");
+			fprintf(Fp, "      ");
 		
 		fprintf(Fp,
 		        "%s (%c%c%c%c%c)\n",
@@ -1877,7 +1892,7 @@ Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 		for (size_t i = 0; i < Node->TokCnt; ++i)
 		{
 			for (unsigned j = 0; j < Depth; ++j)
-				fprintf(Fp, "  ");
+				fprintf(Fp, "      ");
 			Token_Print(Fp, Node->Toks[i], i);
 		}
 	}
@@ -1914,8 +1929,449 @@ Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex)
 static int
 ParseEnum(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement enum parsing.
-	return 1;
+	if (!ExpectToken(Ps, TT_KW_ENUM))
+		return 1;
+	
+	struct Node Enum = {0};
+	
+	// base enum information.
+	{
+		struct Token const *Vis = PeekToken(Ps);
+		if (Vis && Vis->Type == TT_ASTERISK)
+		{
+			Enum.Flags |= NF_PUBLIC;
+			++Ps->i;
+		}
+		
+		struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+		if (!Name)
+			return 1;
+		
+		if (!ExpectToken(Ps, TT_COLON))
+			return 1;
+		
+		struct Node Type = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseWrappedType(&Type, Ps, Term, 1))
+			return 1;
+		
+		Node_AddChild(&Enum, &Type);
+		Node_AddToken(&Enum, Name);
+	}
+	
+	// get enum member information.
+	for (;;)
+	{
+		SkipParseNewlines(Ps);
+		struct Token const *MembName = ExpectToken(Ps, TT_IDENT);
+		if (!MembName)
+		{
+			Node_Destroy(&Enum);
+			return 1;
+		}
+		
+		struct Token const *Next = RequireToken(Ps);
+		if (!Next)
+		{
+			Node_Destroy(&Enum);
+			return 1;
+		}
+		
+		struct Node Memb =
+		{
+			.Type = NT_MEMBER
+		};
+		
+		switch (Next->Type)
+		{
+		case TT_COLON_EQUAL:
+		{
+			struct Node Value = {0};
+			unsigned char Term[] = {TT_NEWLINE};
+			if (ParseWrappedExpr(&Value, Ps, Term, 1))
+			{
+				Node_Destroy(&Enum);
+				return 1;
+			}
+			
+			Node_AddChild(&Memb, &Value);
+			Node_AddToken(&Memb, MembName);
+			
+			Node_AddChild(&Enum, &Memb);
+			
+			break;
+		}
+		case TT_NEWLINE:
+			Node_AddToken(&Memb, MembName);
+			Node_AddChild(&Enum, &Memb);
+			break;
+		default:
+			Node_Destroy(&Enum);
+			LogTokErr(Ps->File, Next, "expected either TT_COLON_EQUAL or TT_NEWLINE!");
+			break;
+		}
+		
+		Next = RequireToken(Ps);
+		if (!Next)
+		{
+			Node_Destroy(&Enum);
+			return 1;
+		}
+		
+		if (Next->Type == TT_KW_END)
+			break;
+		
+		--Ps->i;
+	}
+	
+	*Out = Enum;
+	
+	return 0;
+}
+
+static int
+ParseExpr(struct Node *Out,
+          struct ParseState *Ps,
+          unsigned char const Term[],
+          size_t TermCnt,
+          int MinBp)
+{
+	struct Token const *Tok = RequireToken(Ps);
+	if (!Tok)
+		return 1;
+	
+	// get base LHS operand of expression.
+	struct Node Lhs = {0};
+	switch (Tok->Type)
+	{
+	case TT_IDENT:
+	case TT_LIT_STR:
+	case TT_LIT_INT:
+	case TT_LIT_FLOAT:
+	case TT_LIT_BOOL:
+	case TT_KW_SELF:
+	case TT_KW_VARGCOUNT:
+		Lhs.Type = NT_EXPR_ATOM;
+		Node_AddToken(&Lhs, Tok);
+		break;
+	case TT_KW_BASE:
+	{
+		struct Token const *Modified = RequireToken(Ps);
+		if (!Modified)
+			return 1;
+		
+		switch (Modified->Type)
+		{
+		case TT_LIT_STR:
+			Lhs.Type = NT_EXPR_ATOM;
+			Lhs.Flags |= NF_BASE;
+			Node_AddToken(&Lhs, Tok);
+			break;
+		case TT_BKBEGIN:
+			// TODO: implement expr base-modified list parsing.
+			break;
+		default:
+			LogTokErr(Ps->File, Modified, "%s is not base-modifiable!", TokenTypeNames[Modified->Type]);
+			return 1;
+		}
+		
+		break;
+	}
+	case TT_BKBEGIN:
+		// TODO: implement expr list parsing.
+		break;
+	case TT_PBEGIN:
+	{
+		unsigned char Term[] = {TT_PEND};
+		if (ParseExpr(&Lhs, Ps, Term, 1, 0))
+			return 1;
+		++Ps->i;
+		
+		break;
+	}
+	default:
+	{
+		enum NodeType NudType = TokenTypeToNud(Tok->Type);
+		if (NudType == -1)
+		{
+			LogTokErr(Ps->File, Tok, "expected null denotation!");
+			return 1;
+		}
+		
+		if (ParseExprNud(&Lhs, Ps, Term, TermCnt))
+			return 1;
+		
+		break;
+	}
+	}
+	
+	// process operations.
+	for (;;)
+	{
+		Tok = RequireToken(Ps);
+		if (!Tok)
+		{
+			Node_Destroy(&Lhs);
+			return 1;
+		}
+		--Ps->i;
+		
+		for (size_t i = 0; i < TermCnt; ++i)
+		{
+			if (Term[i] == Tok->Type)
+				goto Done;
+		}
+		
+		enum NodeType LedType = TokenTypeToLed(Tok->Type);
+		if (LedType != -1)
+		{
+			struct BindPower Bp = ExprBindPower[LedType - NT_EXPR];
+			if (Bp.Left < MinBp)
+				break;
+			
+			struct Node NewLhs = {0};
+			if (ParseExprLed(&NewLhs, Ps, &Lhs, Term, TermCnt))
+				return 1;
+			
+			Lhs = NewLhs;
+		}
+		else
+		{
+			LogTokErr(Ps->File, Tok, "expected left denotation!");
+			Node_Destroy(&Lhs);
+			return 1;
+		}
+	}
+Done:
+	*Out = Lhs;
+	
+	return 0;
+}
+
+static int
+ParseExprLed(struct Node *Out,
+             struct ParseState *Ps,
+             struct Node const *Lhs,
+             unsigned char const Term[],
+             size_t TermCnt)
+{
+	struct Token const *Tok = NextToken(Ps);
+	enum NodeType Type = TokenTypeToLed(Tok->Type);
+	
+	struct Node NewLhs =
+	{
+		.Type = Type
+	};
+	
+	switch (Type)
+	{
+	case NT_EXPR_CALL:
+		// TODO: implement expr function call parse.
+		break;
+	case NT_EXPR_CAST:
+		// TODO: implement expr type cast parse.
+		break;
+	case NT_EXPR_TERNARY:
+		// TODO: implement expr tenary conditional parse.
+		break;
+	case NT_EXPR_NTH:
+	case NT_EXPR_ACCESS:
+	case NT_EXPR_DEREF_ACCESS:
+	case NT_EXPR_MUL:
+	case NT_EXPR_DIV:
+	case NT_EXPR_MOD:
+	case NT_EXPR_ADD:
+	case NT_EXPR_SUB:
+	case NT_EXPR_SHR:
+	case NT_EXPR_SHL:
+	case NT_EXPR_BIT_AND:
+	case NT_EXPR_BIT_XOR:
+	case NT_EXPR_BIT_OR:
+	case NT_EXPR_GREATER:
+	case NT_EXPR_GREQUAL:
+	case NT_EXPR_LESS:
+	case NT_EXPR_LEQUAL:
+	case NT_EXPR_EQUAL:
+	case NT_EXPR_NEQUAL:
+	case NT_EXPR_LOG_AND:
+	case NT_EXPR_LOG_XOR:
+	case NT_EXPR_LOG_OR:
+	case NT_EXPR_ASSIGN:
+	case NT_EXPR_ADD_ASSIGN:
+	case NT_EXPR_SUB_ASSIGN:
+	case NT_EXPR_MUL_ASSIGN:
+	case NT_EXPR_DIV_ASSIGN:
+	case NT_EXPR_MOD_ASSIGN:
+	case NT_EXPR_SHR_ASSIGN:
+	case NT_EXPR_SHL_ASSIGN:
+	case NT_EXPR_BIT_AND_ASSIGN:
+	case NT_EXPR_BIT_XOR_ASSIGN:
+	case NT_EXPR_BIT_OR_ASSIGN:
+	{
+		struct BindPower Bp = ExprBindPower[Type - NT_EXPR];
+		struct Node Rhs = {0};
+		if (ParseExpr(&Rhs, Ps, Term, TermCnt, Bp.Right))
+			return 1;
+		
+		Node_AddChild(&NewLhs, Lhs);
+		Node_AddChild(&NewLhs, &Rhs);
+		Node_AddToken(&NewLhs, Tok);
+		
+		break;
+	}
+	case NT_EXPR_POST_INC:
+	case NT_EXPR_POST_DEC:
+	case NT_EXPR_ADDR_OF:
+		Node_AddChild(&NewLhs, Lhs);
+		Node_AddToken(&NewLhs, Tok);
+		break;
+	default:
+		break;
+	}
+	
+	*Out = NewLhs;
+	
+	return 0;
+}
+
+static int
+ParseExprNud(struct Node *Out,
+             struct ParseState *Ps,
+             unsigned char const Term[],
+             size_t TermCnt)
+{
+	struct Token const *Tok = &Ps->Lex->Toks[Ps->i];
+	enum NodeType Type = TokenTypeToNud(Tok->Type);
+	
+	struct Node Lhs =
+	{
+		.Type = Type
+	};
+	
+	switch (Type)
+	{
+	case NT_EXPR_LAMBDA:
+		// TODO: implement lambdas in expressions.
+		break;
+	case NT_EXPR_STRUCT:
+		// TODO: implement struct literals in expressions.
+		break;
+	case NT_EXPR_SIZEOF:
+	{
+		struct Token const *Next = RequireToken(Ps);
+		if (!Next)
+			return 1;
+		
+		switch (Next->Type)
+		{
+		case TT_PBEGIN:
+		{
+			struct Node Rhs = {0};
+			unsigned char Term[] = {TT_PEND};
+			if (ParseExpr(&Rhs, Ps, Term, 1, 0))
+				return 1;
+			
+			Node_AddChild(&Lhs, &Rhs);
+			
+			break;
+		}
+		case TT_BKBEGIN:
+		{
+			struct Node Rhs = {0};
+			unsigned char Term[] = {TT_BKEND};
+			if (ParseWrappedType(&Rhs, Ps, Term, 1))
+				return 1;
+			
+			Node_AddChild(&Lhs, &Rhs);
+			
+			break;
+		}
+		default:
+			LogTokErr(Ps->File, Next, "expected TT_PBEGIN or TT_BKBEGIN!");
+			return 1;
+		}
+		
+		Node_AddToken(&Lhs, Tok);
+		
+		break;
+	}
+	case NT_EXPR_LENOF:
+	{
+		if (!ExpectToken(Ps, TT_PBEGIN))
+			return 1;
+		
+		struct Node Rhs = {0};
+		unsigned char Term[] = {TT_PEND};
+		if (ParseExpr(&Rhs, Ps, Term, 1, 0))
+			return 1;
+		
+		Node_AddChild(&Lhs, &Rhs);
+		Node_AddToken(&Lhs, Tok);
+		
+		break;
+	}
+	case NT_EXPR_NEXTVARG:
+	{
+		if (!ExpectToken(Ps, TT_BKBEGIN))
+			return 1;
+		
+		struct Node Rhs = {0};
+		unsigned char Term[] = {TT_BKEND};
+		if (ParseWrappedType(&Rhs, Ps, Term, 1))
+			return 1;
+		
+		Node_AddChild(&Lhs, &Rhs);
+		Node_AddToken(&Lhs, Tok);
+		
+		break;
+	}
+	case NT_EXPR_NULL:
+	{
+		struct Token const *Peek = PeekToken(Ps);
+		if (Peek && Peek->Type == TT_BKBEGIN)
+		{
+			++Ps->i;
+			
+			struct Node Rhs = {0};
+			unsigned char Term[] = {TT_BKEND};
+			if (ParseWrappedType(&Rhs, Ps, Term, 1))
+				return 1;
+			
+			Node_AddChild(&Lhs, &Rhs);
+			Node_AddToken(&Lhs, Tok);
+		}
+		else
+		{
+			Lhs.Type = NT_EXPR_ATOM;
+			Node_AddToken(&Lhs, Tok);
+		}
+		
+		break;
+	}
+	case NT_EXPR_PRE_INC:
+	case NT_EXPR_PRE_DEC:
+	case NT_EXPR_UNARY_MINUS:
+	case NT_EXPR_LOG_NOT:
+	case NT_EXPR_BIT_NOT:
+	case NT_EXPR_DEREF:
+	{
+		struct BindPower Bp = ExprBindPower[Type - NT_EXPR];
+		struct Node Rhs = {0};
+		if (ParseExpr(&Rhs, Ps, Term, TermCnt, Bp.Right))
+			return 1;
+		
+		Node_AddChild(&Lhs, &Rhs);
+		Node_AddToken(&Lhs, Tok);
+		
+		break;
+	}
+	default:
+		break;
+	}
+	
+	*Out = Lhs;
+	
+	return 0;
 }
 
 static int
@@ -2192,6 +2648,7 @@ ParseType(struct Node *Out,
 		case TT_KW_BOOL:
 		case TT_KW_FLOAT32:
 		case TT_KW_FLOAT64:
+		case TT_KW_SELF:
 		case TT_KW_NULL:
 			Lhs.Type = NT_TYPE_ATOM;
 			Node_AddToken(&Lhs, BaseType);
@@ -2253,8 +2710,33 @@ ParseType(struct Node *Out,
 			break;
 		}
 		case TT_KW_BASE:
-			// TODO: implement type buffer modifier.
+		{
+			if (!ExpectToken(Ps, TT_BKBEGIN))
+			{
+				Node_Destroy(&Lhs);
+				return 1;
+			}
+			
+			struct Node Size = {0};
+			unsigned char Term[] = {TT_BKEND};
+			if (ParseWrappedExpr(&Size, Ps, Term, 1))
+			{
+				Node_Destroy(&Lhs);
+				return 1;
+			}
+			
+			struct Node NewLhs =
+			{
+				.Type = NT_TYPE_BUFFER
+			};
+			
+			Node_AddChild(&NewLhs, &Lhs);
+			Node_AddChild(&NewLhs, &Size);
+			Node_AddToken(&NewLhs, Mod);
+			Lhs = NewLhs;
+			
 			break;
+		}
 		case TT_PBEGIN:
 		{
 			struct Node NewLhs =
@@ -2460,8 +2942,91 @@ ParseUnion(struct Node *Out, struct ParseState *Ps)
 static int
 ParseVar(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement var parsing.
-	return 1;
+	struct Token const *VarDecl = RequireToken(Ps);
+	if (!VarDecl)
+		return 1;
+	
+	struct Node Var =
+	{
+		.Type = NT_VAR
+	};
+	
+	// base var information.
+	{
+		switch (VarDecl->Type)
+		{
+		case TT_KW_EXTERNVAR:
+			Var.Flags |= NF_EXTERN;
+			break;
+		case TT_KW_VAR:
+			break;
+		default:
+			LogTokErr(Ps->File, VarDecl, "expected either TT_KW_EXTERNVAR or TT_KW_VAR!");
+			return 1;
+		}
+		
+		struct Token const *Vis = PeekToken(Ps);
+		if (Vis && Vis->Type == TT_ASTERISK)
+		{
+			Var.Flags |= NF_PUBLIC;
+			++Ps->i;
+		}
+		
+		struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+		if (!Name)
+			return 1;
+		
+		if (!ExpectToken(Ps, TT_COLON))
+			return 1;
+		
+		struct Node Type = {0};
+		unsigned char Term[] = {TT_NEWLINE, TT_COLON_EQUAL};
+		if (ParseWrappedType(&Type, Ps, Term, 2))
+			return 1;
+		
+		Node_AddChild(&Var, &Type);
+		Node_AddToken(&Var, Name);
+	}
+	
+	// get initial value if present.
+	{
+		if (Ps->Lex->Toks[Ps->i].Type == TT_COLON_EQUAL)
+		{
+			struct Node Value = {0};
+			unsigned char Term[] = {TT_NEWLINE};
+			if (ParseWrappedExpr(&Value, Ps, Term, 1))
+			{
+				Node_Destroy(&Var);
+				return 1;
+			}
+			
+			Node_AddChild(&Var, &Value);
+		}
+	}
+	
+	*Out = Var;
+	
+	return 0;
+}
+
+static int
+ParseWrappedExpr(struct Node *Out,
+                 struct ParseState *Ps,
+                 unsigned char const Term[],
+                 size_t TermCnt)
+{
+	struct Token const *FirstTok = PeekToken(Ps);
+	
+	struct Node Child = {0};
+	if (ParseExpr(&Child, Ps, Term, TermCnt, 0))
+		return 1;
+	++Ps->i;
+	
+	Out->Type = NT_EXPR;
+	Node_AddChild(Out, &Child);
+	Node_AddToken(Out, FirstTok);
+	
+	return 0;
 }
 
 static int
@@ -2470,19 +3035,11 @@ ParseWrappedType(struct Node *Out,
                  unsigned char const Term[],
                  size_t TermCnt)
 {
+	struct Token const *FirstTok = PeekToken(Ps);
+	
 	struct Node Child = {0};
 	if (ParseType(&Child, Ps, Term, TermCnt))
 		return 1;
-	
-	// find first token of type expression.
-	struct Token const *FirstTok;
-	{
-		struct Node const *Left = &Child;
-		while (Left->ChildCnt > 0)
-			Left = &Left->Children[0];
-		
-		FirstTok = Left->Toks[0];
-	}
 	
 	Out->Type = NT_TYPE;
 	Node_AddChild(Out, &Child);
@@ -2631,6 +3188,128 @@ Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind)
 		break;
 	}
 	fprintf(Fp, "\n");
+}
+
+static enum NodeType
+TokenTypeToLed(enum TokenType Type)
+{
+	switch (Type)
+	{
+	case TT_DOUBLE_PLUS:
+		return NT_EXPR_POST_INC;
+	case TT_DOUBLE_MINUS:
+		return NT_EXPR_POST_DEC;
+	case TT_PBEGIN:
+		return NT_EXPR_CALL;
+	case TT_AT:
+		return NT_EXPR_NTH;
+	case TT_CARET:
+		return NT_EXPR_ADDR_OF;
+	case TT_PERIOD:
+		return NT_EXPR_ACCESS;
+	case TT_KW_AS:
+		return NT_EXPR_CAST;
+	case TT_PERIOD_CARET_PERIOD:
+		return NT_EXPR_DEREF_ACCESS;
+	case TT_ASTERISK:
+		return NT_EXPR_MUL;
+	case TT_SLASH:
+		return NT_EXPR_DIV;
+	case TT_PERCENT:
+		return NT_EXPR_MOD;
+	case TT_PLUS:
+		return NT_EXPR_ADD;
+	case TT_MINUS:
+		return NT_EXPR_SUB;
+	case TT_DOUBLE_GREATER:
+		return NT_EXPR_SHR;
+	case TT_DOUBLE_LESS:
+		return NT_EXPR_SHL;
+	case TT_AMPERSAND:
+		return NT_EXPR_BIT_AND;
+	case TT_TILDE:
+		return NT_EXPR_BIT_XOR;
+	case TT_PIPE:
+		return NT_EXPR_BIT_OR;
+	case TT_GREATER:
+		return NT_EXPR_GREATER;
+	case TT_GREQUAL:
+		return NT_EXPR_GREQUAL;
+	case TT_LESS:
+		return NT_EXPR_LESS;
+	case TT_LEQUAL:
+		return NT_EXPR_LEQUAL;
+	case TT_DOUBLE_EQUAL:
+		return NT_EXPR_EQUAL;
+	case TT_BANG_EQUAL:
+		return NT_EXPR_NEQUAL;
+	case TT_DOUBLE_AMPERSAND:
+		return NT_EXPR_LOG_AND;
+	case TT_DOUBLE_TILDE:
+		return NT_EXPR_LOG_XOR;
+	case TT_DOUBLE_PIPE:
+		return NT_EXPR_LOG_OR;
+	case TT_QUESTION:
+		return NT_EXPR_TERNARY;
+	case TT_COLON_EQUAL:
+		return NT_EXPR_ASSIGN;
+	case TT_PLUS_EQUAL:
+		return NT_EXPR_ADD_ASSIGN;
+	case TT_MINUS_EQUAL:
+		return NT_EXPR_SUB_ASSIGN;
+	case TT_ASTERISK_EQUAL:
+		return NT_EXPR_MUL_ASSIGN;
+	case TT_SLASH_EQUAL:
+		return NT_EXPR_DIV_ASSIGN;
+	case TT_PERCENT_EQUAL:
+		return NT_EXPR_MOD_ASSIGN;
+	case TT_DOUBLE_GREATER_EQUAL:
+		return NT_EXPR_SHR_ASSIGN;
+	case TT_DOUBLE_LESS_EQUAL:
+		return NT_EXPR_SHL_ASSIGN;
+	case TT_AMPERSAND_EQUAL:
+		return NT_EXPR_BIT_AND_ASSIGN;
+	case TT_TILDE_EQUAL:
+		return NT_EXPR_BIT_XOR_ASSIGN;
+	case TT_PIPE_EQUAL:
+		return NT_EXPR_BIT_OR_ASSIGN;
+	default:
+		return -1;
+	}
+}
+
+static enum NodeType
+TokenTypeToNud(enum TokenType Type)
+{
+	switch (Type)
+	{
+	case TT_KW_PROC:
+		return NT_EXPR_LAMBDA;
+	case TT_KW_STRUCT:
+		return NT_EXPR_STRUCT;
+	case TT_KW_SIZEOF:
+		return NT_EXPR_SIZEOF;
+	case TT_KW_LENOF:
+		return NT_EXPR_LENOF;
+	case TT_KW_NEXTVARG:
+		return NT_EXPR_NEXTVARG;
+	case TT_KW_NULL:
+		return NT_EXPR_NULL;
+	case TT_DOUBLE_PLUS:
+		return NT_EXPR_PRE_INC;
+	case TT_DOUBLE_MINUS:
+		return NT_EXPR_PRE_DEC;
+	case TT_MINUS:
+		return NT_EXPR_UNARY_MINUS;
+	case TT_BANG:
+		return NT_EXPR_LOG_NOT;
+	case TT_TILDE:
+		return NT_EXPR_BIT_NOT;
+	case TT_CARET:
+		return NT_EXPR_DEREF;
+	default:
+		return -1;
+	}
 }
 
 static void
