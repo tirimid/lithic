@@ -14,7 +14,7 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc PrintAll(...)
+Proc PrintAll(...): Null
 	Var i: Usize Mut := 0's
 	While i < VargCount
 		Print("{s} ", NextVarg[Uint8[]])
@@ -44,6 +44,6 @@ End
 ; function, without a count, meaning you must have an argument prior to them and
 ; cannot use `VargCount` within the function.
 ; this should be used for creating interfaces to external C functions.
-Proc CVarArgs(Something: Int32, Base ...)
+Proc CVarArgs(Something: Int32, Base ...): Null
 	; do something.
 End

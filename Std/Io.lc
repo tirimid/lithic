@@ -1,3 +1,0 @@
-Proc *Print(Fmt: Uint8[], ...)
-	; TODO: implement.
-End

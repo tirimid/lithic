@@ -61,7 +61,6 @@ enum TokenType
 	TT_KW_MUT,
 	TT_KW_NEXTVARG,
 	TT_KW_NULL,
-	TT_KW_OPAQUETYPE,
 	TT_KW_PROC,
 	TT_KW_RESETVARGS,
 	TT_KW_RETURN,
@@ -217,15 +216,17 @@ enum NodeType
 	NT_STRUCT,
 	NT_ENUM,
 	NT_UNION,
-	NT_TYPE_ALIAS,
-	NT_OPAQUE_TYPE
+	NT_MEMBER,
+	NT_TYPE_ALIAS
 };
 
 enum NodeFlag
 {
 	NF_PUBLIC = 0x1,
 	NF_EXTERN = 0x2,
-	NF_MUT = 0x4
+	NF_MUT = 0x4,
+	NF_BASE = 0x8,
+	NF_VARIADIC = 0x10
 };
 
 enum ConfFlag
@@ -342,15 +343,18 @@ static void Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth);
 static int Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex);
 static int ParseEnum(struct Node *Out, struct ParseState *Ps);
 static int ParseImport(struct Node *Out, struct ParseState *Ps);
-static int ParseOpaqueType(struct Node *Out, struct ParseState *Ps);
 static int ParseProc(struct Node *Out, struct ParseState *Ps);
 static int ParseProgram(struct Node *Out, struct ParseState *Ps);
 static int ParseStruct(struct Node *Out, struct ParseState *Ps);
+static int ParseType(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseTypeAlias(struct Node *Out, struct ParseState *Ps);
 static int ParseUnion(struct Node *Out, struct ParseState *Ps);
 static int ParseVar(struct Node *Out, struct ParseState *Ps);
+static int ParseWrappedType(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static struct Token const *PeekToken(struct ParseState const *Ps);
+static struct Token const *RequireToken(struct ParseState *Ps);
 static unsigned SizeModBits(enum SizeMod Mod);
+static void SkipParseNewlines(struct ParseState *Ps);
 static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
 static void Token_Destroy(struct Token *Tok);
@@ -410,7 +414,6 @@ static char const *Keywords[] =
 	"Mut",
 	"NextVarg",
 	"Null",
-	"OpaqueType",
 	"Proc",
 	"ResetVargs",
 	"Return",
@@ -469,7 +472,6 @@ static char const *TokenTypeNames[] =
 	"TT_KW_MUT",
 	"TT_KW_NEXTVARG",
 	"TT_KW_NULL",
-	"TT_KW_OPAQUETYPE",
 	"TT_KW_PROC",
 	"TT_KW_RESETVARGS",
 	"TT_KW_RETURN",
@@ -624,8 +626,8 @@ static char const *NodeTypeNames[] =
 	"NT_STRUCT",
 	"NT_ENUM",
 	"NT_UNION",
-	"NT_TYPE_ALIAS",
-	"NT_OPAQUE_TYPE"
+	"NT_MEMBER",
+	"NT_TYPE_ALIAS"
 };
 
 static struct BindPower ExprBindPower[] =
@@ -949,7 +951,7 @@ ExpectToken(struct ParseState *Ps, enum TokenType Type)
 	struct Token const *Tok = NextToken(Ps);
 	if (!Tok)
 	{
-		LogTokErr(Ps->File, Tok, "expected %s at end of file, found nothing!", TokenTypeNames[Type]);
+		LogProgErr(Ps->File, Ps->File->Len, "expected %s at end of file, found nothing!", TokenTypeNames[Type]);
 		return NULL;
 	}
 	
@@ -1039,7 +1041,10 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			{
 				struct Token Tok;
 				if (LexWord(Data, &Tok, &i))
+				{
+					LexData_Destroy(Out);
 					return 1;
+				}
 				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
@@ -1048,7 +1053,10 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			{
 				struct Token Tok;
 				if (LexNum(Data, &Tok, &i))
+				{
+					LexData_Destroy(Out);
 					return 1;
+				}
 				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
@@ -1057,7 +1065,10 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			{
 				struct Token Tok;
 				if (LexChar(Data, &Tok, &i))
+				{
+					LexData_Destroy(Out);
 					return 1;
+				}
 				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
@@ -1066,7 +1077,10 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			{
 				struct Token Tok;
 				if (LexString(Data, &Tok, &i))
+				{
+					LexData_Destroy(Out);
 					return 1;
+				}
 				LexData_AddToken(Out, &Tok);
 				--i;
 				continue;
@@ -1276,6 +1290,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				break;
 			default:
 				LogProgErr(Data, i, "unhandled character - '%c'!", Data->Data[i]);
+				LexData_Destroy(Out);
 				return 1;
 			}
 		}
@@ -1851,11 +1866,13 @@ Node_Print(FILE *Fp, struct Node const *Node, unsigned Depth)
 			fprintf(Fp, "  ");
 		
 		fprintf(Fp,
-		        "%s (%c%c%c)\n",
+		        "%s (%c%c%c%c%c)\n",
 		        NodeTypeNames[Node->Type],
 		        Node->Flags & NF_PUBLIC ? 'P' : '-',
 		        Node->Flags & NF_EXTERN ? 'E' : '-',
-		        Node->Flags & NF_MUT ? 'M' : '-');
+		        Node->Flags & NF_MUT ? 'M' : '-',
+		        Node->Flags & NF_BASE ? 'B' : '-',
+		        Node->Flags & NF_VARIADIC ? 'V' : '-');
 		
 		for (size_t i = 0; i < Node->TokCnt; ++i)
 		{
@@ -1897,15 +1914,14 @@ Parse(struct Node *Out, struct FileData const *File, struct LexData const *Lex)
 static int
 ParseEnum(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
+	// TODO: implement enum parsing.
 	return 1;
 }
 
 static int
 ParseImport(struct Node *Out, struct ParseState *Ps)
 {
-	struct Token const *Import = ExpectToken(Ps, TT_KW_IMPORT);
-	if (!Import)
+	if (!ExpectToken(Ps, TT_KW_IMPORT))
 		return 1;
 	
 	struct Token const *Vis = PeekToken(Ps);
@@ -1954,33 +1970,9 @@ Done:
 }
 
 static int
-ParseOpaqueType(struct Node *Out, struct ParseState *Ps)
-{
-	struct Token const *OpaqueType = ExpectToken(Ps, TT_KW_OPAQUETYPE);
-	if (!OpaqueType)
-		return 1;
-	
-	struct Token const *Vis = PeekToken(Ps);
-	if (Vis && Vis->Type == TT_ASTERISK)
-	{
-		Out->Flags |= NF_PUBLIC;
-		++Ps->i;
-	}
-	
-	struct Token const *Ident = ExpectToken(Ps, TT_IDENT);
-	if (!Ident)
-		return 1;
-	
-	Node_AddToken(Out, Ident);
-	Out->Type = NT_OPAQUE_TYPE;
-	
-	return 0;
-}
-
-static int
 ParseProc(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
+	// TODO: implement procedure parsing.
 	return 1;
 }
 
@@ -2074,17 +2066,6 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 			Node_AddChild(Out, &Child);
 			break;
 		}
-		case TT_KW_OPAQUETYPE:
-		{
-			struct Node Child = {0};
-			if (ParseOpaqueType(&Child, Ps))
-			{
-				Node_Destroy(Out);
-				return 1;
-			}
-			Node_AddChild(Out, &Child);
-			break;
-		}
 		case TT_NEWLINE:
 			++Ps->i;
 			break;
@@ -2103,35 +2084,430 @@ ParseProgram(struct Node *Out, struct ParseState *Ps)
 static int
 ParseStruct(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
-	return 1;
+	if (!ExpectToken(Ps, TT_KW_STRUCT))
+		return 1;
+	
+	struct Node Struct =
+	{
+		.Type = NT_STRUCT
+	};
+	
+	// base struct information.
+	{
+		struct Token const *Vis = PeekToken(Ps);
+		if (Vis && Vis->Type == TT_ASTERISK)
+		{
+			Struct.Flags |= NF_PUBLIC;
+			++Ps->i;
+		}
+		
+		struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+		if (!Name)
+			return 1;
+		
+		if (!ExpectToken(Ps, TT_NEWLINE))
+			return 1;
+		
+		Node_AddToken(&Struct, Name);
+	}
+	
+	// get struct member information.
+	for (;;)
+	{
+		SkipParseNewlines(Ps);
+		struct Token const *MembName = ExpectToken(Ps, TT_IDENT);
+		if (!MembName)
+		{
+			Node_Destroy(&Struct);
+			return 1;
+		}
+		
+		if (!ExpectToken(Ps, TT_COLON))
+		{
+			Node_Destroy(&Struct);
+			return 1;
+		}
+		
+		struct Node MembType = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseWrappedType(&MembType, Ps, Term, 1))
+		{
+			Node_Destroy(&Struct);
+			return 1;
+		}
+		
+		struct Node Memb =
+		{
+			.Type = NT_MEMBER
+		};
+		Node_AddChild(&Memb, &MembType);
+		Node_AddToken(&Memb, MembName);
+		
+		Node_AddChild(&Struct, &Memb);
+		
+		struct Token const *Next = RequireToken(Ps);
+		if (!Next)
+		{
+			Node_Destroy(&Struct);
+			return 1;
+		}
+		
+		if (Next->Type == TT_KW_END)
+			break;
+		
+		--Ps->i;
+	}
+	
+	*Out = Struct;
+	
+	return 0;
+}
+
+static int
+ParseType(struct Node *Out,
+          struct ParseState *Ps,
+          unsigned char const Term[],
+          size_t TermCnt)
+{
+	// get base type.
+	struct Node Lhs = {0};
+	{
+		struct Token const *BaseType = RequireToken(Ps);
+		if (!BaseType)
+			return 1;
+		
+		switch (BaseType->Type)
+		{
+		case TT_IDENT:
+		case TT_KW_UINT8:
+		case TT_KW_UINT16:
+		case TT_KW_UINT32:
+		case TT_KW_UINT64:
+		case TT_KW_USIZE:
+		case TT_KW_INT8:
+		case TT_KW_INT16:
+		case TT_KW_INT32:
+		case TT_KW_INT64:
+		case TT_KW_ISIZE:
+		case TT_KW_BOOL:
+		case TT_KW_FLOAT32:
+		case TT_KW_FLOAT64:
+		case TT_KW_NULL:
+			Lhs.Type = NT_TYPE_ATOM;
+			Node_AddToken(&Lhs, BaseType);
+			break;
+		default:
+			LogTokErr(Ps->File, BaseType, "expected type atom!");
+			return 1;
+		}
+	}
+	
+	// process type modifiers.
+	for (;;)
+	{
+		struct Token const *Mod = RequireToken(Ps);
+		if (!Mod)
+		{
+			Node_Destroy(&Lhs);
+			return 1;
+		}
+		
+		for (size_t i = 0; i < TermCnt; ++i)
+		{
+			if (Term[i] == Mod->Type)
+				goto Done;
+		}
+		
+		switch (Mod->Type)
+		{
+		case TT_CARET:
+		{
+			struct Node NewLhs =
+			{
+				.Type = NT_TYPE_PTR
+			};
+			
+			Node_AddChild(&NewLhs, &Lhs);
+			Node_AddToken(&NewLhs, Mod);
+			Lhs = NewLhs;
+			
+			break;
+		}
+		case TT_BKBEGIN:
+		{
+			if (!ExpectToken(Ps, TT_BKEND))
+			{
+				Node_Destroy(&Lhs);
+				return 1;
+			}
+			
+			struct Node NewLhs =
+			{
+				.Type = NT_TYPE_ARRAY
+			};
+			
+			Node_AddChild(&NewLhs, &Lhs);
+			Node_AddToken(&NewLhs, Mod);
+			Lhs = NewLhs;
+			
+			break;
+		}
+		case TT_KW_BASE:
+			// TODO: implement type buffer modifier.
+			break;
+		case TT_PBEGIN:
+		{
+			struct Node NewLhs =
+			{
+				.Type = NT_TYPE_PROC
+			};
+			
+			Node_AddChild(&NewLhs, &Lhs);
+			Node_AddToken(&NewLhs, Mod);
+			Lhs = NewLhs;
+			
+			for (;;)
+			{
+				struct Token const *Tok = RequireToken(Ps);
+				if (!Tok)
+				{
+					Node_Destroy(&Lhs);
+					return 1;
+				}
+				
+				switch (Tok->Type)
+				{
+				case TT_TRIPLE_PERIOD:
+					if (!ExpectToken(Ps, TT_PEND))
+					{
+						Node_Destroy(&Lhs);
+						return 1;
+					}
+					Lhs.Flags |= NF_VARIADIC;
+					break;
+				case TT_KW_BASE:
+					if (!ExpectToken(Ps, TT_TRIPLE_PERIOD))
+					{
+						Node_Destroy(&Lhs);
+						return 1;
+					}
+					if (!ExpectToken(Ps, TT_PEND))
+					{
+						Node_Destroy(&Lhs);
+						return 1;
+					}
+					Lhs.Flags |= NF_VARIADIC;
+					Lhs.Flags |= NF_BASE;
+					break;
+				case TT_PEND:
+					break;
+				default:
+				{
+					--Ps->i;
+					struct Node Child = {0};
+					unsigned char Term[] = {TT_COMMA, TT_PEND};
+					if (ParseType(&Child, Ps, Term, 2))
+					{
+						Node_Destroy(&Lhs);
+						return 1;
+					}
+					Node_AddChild(&Lhs, &Child);
+					break;
+				}
+				}
+				
+				if (Ps->Lex->Toks[Ps->i].Type == TT_PEND)
+					break;
+			}
+			
+			break;
+		}
+		case TT_KW_MUT:
+			if (Lhs.Flags & NF_MUT)
+			{
+				LogTokErr(Ps->File, Mod, "mutability modifier cannot be applied on a type multiple times!");
+				Node_Destroy(&Lhs);
+				return 1;
+			}
+			Lhs.Flags |= NF_MUT;
+			break;
+		default:
+			LogTokErr(Ps->File, Mod, "expected type modifier or terminator!");
+			Node_Destroy(&Lhs);
+			return 1;
+		}
+	}
+Done:
+	*Out = Lhs;
+	
+	return 0;
 }
 
 static int
 ParseTypeAlias(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
-	return 1;
+	if (!ExpectToken(Ps, TT_KW_TYPEALIAS))
+		return 1;
+	
+	struct Token const *Vis = PeekToken(Ps);
+	if (Vis && Vis->Type == TT_ASTERISK)
+	{
+		Out->Flags |= NF_PUBLIC;
+		++Ps->i;
+	}
+	
+	struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+	if (!Name)
+		return 1;
+	
+	if (!ExpectToken(Ps, TT_COLON_EQUAL))
+		return 1;
+	
+	struct Node Child = {0};
+	unsigned char Term[] = {TT_NEWLINE};
+	if (ParseWrappedType(&Child, Ps, Term, 1))
+		return 1;
+	
+	Out->Type = NT_TYPE_ALIAS;
+	Node_AddToken(Out, Name);
+	Node_AddChild(Out, &Child);
+	
+	return 0;
 }
 
 static int
 ParseUnion(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
-	return 1;
+	if (!ExpectToken(Ps, TT_KW_UNION))
+		return 1;
+	
+	struct Node Union =
+	{
+		.Type = NT_UNION
+	};
+	
+	// base union information.
+	{
+		struct Token const *Vis = PeekToken(Ps);
+		if (Vis && Vis->Type == TT_ASTERISK)
+		{
+			Union.Flags |= NF_PUBLIC;
+			++Ps->i;
+		}
+		
+		struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+		if (!Name)
+			return 1;
+		
+		if (!ExpectToken(Ps, TT_NEWLINE))
+			return 1;
+		
+		Node_AddToken(&Union, Name);
+	}
+	
+	// get union member information.
+	for (;;)
+	{
+		SkipParseNewlines(Ps);
+		struct Token const *MembName = ExpectToken(Ps, TT_IDENT);
+		if (!MembName)
+		{
+			Node_Destroy(&Union);
+			return 1;
+		}
+		
+		if (!ExpectToken(Ps, TT_COLON))
+		{
+			Node_Destroy(&Union);
+			return 1;
+		}
+		
+		struct Node MembType = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseWrappedType(&MembType, Ps, Term, 1))
+		{
+			Node_Destroy(&Union);
+			return 1;
+		}
+		
+		struct Node Memb =
+		{
+			.Type = NT_MEMBER
+		};
+		Node_AddChild(&Memb, &MembType);
+		Node_AddToken(&Memb, MembName);
+		
+		Node_AddChild(&Union, &Memb);
+		
+		struct Token const *Next = RequireToken(Ps);
+		if (!Next)
+		{
+			Node_Destroy(&Union);
+			return 1;
+		}
+		
+		if (Next->Type == TT_KW_END)
+			break;
+		
+		--Ps->i;
+	}
+	
+	*Out = Union;
+	
+	return 0;
 }
 
 static int
 ParseVar(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement.
+	// TODO: implement var parsing.
 	return 1;
+}
+
+static int
+ParseWrappedType(struct Node *Out,
+                 struct ParseState *Ps,
+                 unsigned char const Term[],
+                 size_t TermCnt)
+{
+	struct Node Child = {0};
+	if (ParseType(&Child, Ps, Term, TermCnt))
+		return 1;
+	
+	// find first token of type expression.
+	struct Token const *FirstTok;
+	{
+		struct Node const *Left = &Child;
+		while (Left->ChildCnt > 0)
+			Left = &Left->Children[0];
+		
+		FirstTok = Left->Toks[0];
+	}
+	
+	Out->Type = NT_TYPE;
+	Node_AddChild(Out, &Child);
+	Node_AddToken(Out, FirstTok);
+	
+	return 0;
 }
 
 static struct Token const *
 PeekToken(struct ParseState const *Ps)
 {
 	return Ps->i + 1 >= Ps->Lex->TokCnt ? NULL : &Ps->Lex->Toks[Ps->i + 1];
+}
+
+static struct Token const *
+RequireToken(struct ParseState *Ps)
+{
+	struct Token const *Tok = NextToken(Ps);
+	if (!Tok)
+	{
+		LogProgErr(Ps->File, Ps->File->Len, "required token at end of file, found nothing!");
+		return NULL;
+	}
+	
+	return Tok;
 }
 
 static unsigned
@@ -2148,6 +2524,18 @@ SizeModBits(enum SizeMod Mod)
 	};
 	
 	return Bits[Mod];
+}
+
+static void
+SkipParseNewlines(struct ParseState *Ps)
+{
+	for (;;)
+	{
+		struct Token const *Peek = PeekToken(Ps);
+		if (!Peek || Peek->Type != TT_NEWLINE)
+			break;
+		++Ps->i;
+	}
 }
 
 static int

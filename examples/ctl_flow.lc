@@ -38,6 +38,6 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc DoSomething()
+Proc DoSomething(): Null
 	; implementation here...
 End

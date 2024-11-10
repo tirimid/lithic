@@ -4,10 +4,12 @@
 ; * Uint16		16-bit unsigned integer
 ; * Uint32		32-bit unsigned integer
 ; * Uint64		64-bit unsigned integer
+; * Usize		platform size unsigned integer
 ; * Int8		8-bit signed integer
 ; * Int16		16-bit signed integer
 ; * Int32		32-bit signed integer
 ; * Int64		64-bit signed integer
+; * Isize		platform size signed integer
 ; * Bool		boolean true/false value
 ; * Float32		single precision floating point value
 ; * Float64		double precision floating point value
@@ -23,4 +25,9 @@
 ; you can also use these "pseudotypes" (take the position of a type but
 ; technically are not actually one):
 ;
-; * Self
+; * Self		local pointer / instance of calling object
+; * Null		somewhat equivalent to `void` in C
+
+; convenient type aliases can be created like this:
+TypeAlias PtrToMutUint8VarProc := Uint8 Mut(Uint8, Uint8 Mut, ...)
+TypeAlias ProcPtr := Null()

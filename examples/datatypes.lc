@@ -24,11 +24,6 @@ Struct Vec4
 	w: Float32
 End
 
-; opaque types can be defined like this.
-; they should be used when interfacing with C code.
-; an opaque type can only be used modified with a pointer.
-OpaqueType OpaqueVec
-
 Union VecN
 	; typenames are not stored in the same namespace as everything else.
 	; as such, you can name variables with the same name as their type.
@@ -73,12 +68,12 @@ Proc Vec.Add(Self, Rhs: Vec): Vec
 End
 
 ; can be invoked using `SomeVec.AddAssign(SomeOtherVec)`.
-Proc Vec.AddAssign(Self Mut*, Rhs: Vec)
+Proc Vec.AddAssign(Self Mut*, Rhs: Vec): Null
 	*Self := Self.^.Add(Rhs)
 End
 
 ; equivalent of static methods.
-Proc Vec.Create(Val: Float32)
+Proc Vec.Create(Val: Float32): Vec
 	Return Struct Vec( \
 		.Type := VecType.Vec4, \
 		.Data.Vec4 := Struct Vec4( \
@@ -103,7 +98,7 @@ End
 ; method-style procedures declared with `Self Mut*` can only be called on
 ; variables whose types are marked with `Mut`.
 
-Proc NullStructures()
+Proc NullStructures(): Null
 	Var Vec: Vec := Null[Vec]
 	If Vec == Null[Vec]
 		; `Vec` is fully zeroed.

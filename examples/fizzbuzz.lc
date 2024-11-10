@@ -10,7 +10,7 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc FizzBuzz(n: Int32)
+Proc FizzBuzz(n: Int32): Null
 	Var Printed: Bool Mut := False
 
 	If n % 3 == 0
