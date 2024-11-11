@@ -345,6 +345,7 @@ static int Parse(struct Node *Out, struct FileData const *File, struct LexData c
 static int ParseEnum(struct Node *Out, struct ParseState *Ps);
 static int ParseExpr(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt, int MinBp);
 static int ParseExprLed(struct Node *Out, struct ParseState *Ps, struct Node const *Lhs, unsigned char const Term[], size_t TermCnt);
+static int ParseExprList(struct Node *Out, struct ParseState *Ps);
 static int ParseExprNud(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseImport(struct Node *Out, struct ParseState *Ps);
 static int ParseProc(struct Node *Out, struct ParseState *Ps);
@@ -1288,6 +1289,19 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				else
 					LexData_AddSpecialChar(Out, i, 1, TT_PIPE);
 				break;
+			case '=':
+				if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "==", 2))
+				{
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_EQUAL);
+					++i;
+				}
+				else
+				{
+					LogProgErr(Data, i, "expected double '==', found single '='!");
+					LexData_Destroy(Out);
+					return 1;
+				}
+				break;
 			case '?':
 				LexData_AddSpecialChar(Out, i, 1, TT_QUESTION);
 				break;
@@ -1673,12 +1687,15 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	// determine word contents and token type.
 	char *Word = Substr(Data->Data, Lb, *i);
 	enum TokenType Type = TT_IDENT;
-	for (size_t Kw = TT_KW_FIRST__; Kw <= TT_KW_LAST__; ++Kw)
+	if (!IsRaw)
 	{
-		if (!strcmp(Word, Keywords[Kw - TT_KW_FIRST__]))
+		for (size_t Kw = TT_KW_FIRST__; Kw <= TT_KW_LAST__; ++Kw)
 		{
-			Type = Kw;
-			break;
+			if (!strcmp(Word, Keywords[Kw - TT_KW_FIRST__]))
+			{
+				Type = Kw;
+				break;
+			}
 		}
 	}
 	
@@ -2068,7 +2085,10 @@ ParseExpr(struct Node *Out,
 			Node_AddToken(&Lhs, Tok);
 			break;
 		case TT_BKBEGIN:
-			// TODO: implement expr base-modified list parsing.
+			--Ps->i;
+			if (ParseExprList(&Lhs, Ps))
+				return 1;
+			Lhs.Flags |= NF_BASE;
 			break;
 		default:
 			LogTokErr(Ps->File, Modified, "%s is not base-modifiable!", TokenTypeNames[Modified->Type]);
@@ -2078,7 +2098,9 @@ ParseExpr(struct Node *Out,
 		break;
 	}
 	case TT_BKBEGIN:
-		// TODO: implement expr list parsing.
+		--Ps->i;
+		if (ParseExprList(&Lhs, Ps))
+			return 1;
 		break;
 	case TT_PBEGIN:
 	{
@@ -2131,7 +2153,10 @@ ParseExpr(struct Node *Out,
 			
 			struct Node NewLhs = {0};
 			if (ParseExprLed(&NewLhs, Ps, &Lhs, Term, TermCnt))
+			{
+				Node_Destroy(&Lhs);
 				return 1;
+			}
 			
 			Lhs = NewLhs;
 		}
@@ -2166,14 +2191,69 @@ ParseExprLed(struct Node *Out,
 	switch (Type)
 	{
 	case NT_EXPR_CALL:
-		// TODO: implement expr function call parse.
+	{
+		Node_AddChild(&NewLhs, Lhs);
+		
+		for (;;)
+		{
+			struct Node Arg = {0};
+			unsigned char Term[] = {TT_COMMA, TT_PEND};
+			if (ParseExpr(&Arg, Ps, Term, 2, 0))
+			{
+				Node_Destroy(&NewLhs);
+				return 1;
+			}
+			++Ps->i;
+			
+			Node_AddChild(&NewLhs, &Arg);
+			
+			if (Ps->Lex->Toks[Ps->i].Type == TT_PEND)
+				break;
+		}
+		
+		Node_AddToken(&NewLhs, Tok);
+		
 		break;
+	}
 	case NT_EXPR_CAST:
-		// TODO: implement expr type cast parse.
+	{
+		if (!ExpectToken(Ps, TT_BKBEGIN))
+			return 1;
+		
+		struct Node Rhs = {0};
+		unsigned char Term[] = {TT_BKEND};
+		if (ParseWrappedType(&Rhs, Ps, Term, 1))
+			return 1;
+		
+		Node_AddChild(&NewLhs, Lhs);
+		Node_AddChild(&NewLhs, &Rhs);
+		Node_AddToken(&NewLhs, Tok);
+		
 		break;
+	}
 	case NT_EXPR_TERNARY:
-		// TODO: implement expr tenary conditional parse.
+	{
+		struct Node Mhs = {0};
+		unsigned char MhsTerm[] = {TT_COLON};
+		if (ParseExpr(&Mhs, Ps, MhsTerm, 1, 0))
+			return 1;
+		++Ps->i;
+		
+		struct BindPower Bp = ExprBindPower[Type - NT_EXPR];
+		struct Node Rhs = {0};
+		if (ParseExpr(&Rhs, Ps, Term, TermCnt, Bp.Right))
+		{
+			Node_Destroy(&Mhs);
+			return 1;
+		}
+		
+		Node_AddChild(&NewLhs, Lhs);
+		Node_AddChild(&NewLhs, &Mhs);
+		Node_AddChild(&NewLhs, &Rhs);
+		Node_AddToken(&NewLhs, Tok);
+		
 		break;
+	}
 	case NT_EXPR_NTH:
 	case NT_EXPR_ACCESS:
 	case NT_EXPR_DEREF_ACCESS:
@@ -2230,6 +2310,41 @@ ParseExprLed(struct Node *Out,
 	}
 	
 	*Out = NewLhs;
+	
+	return 0;
+}
+
+static int
+ParseExprList(struct Node *Out, struct ParseState *Ps)
+{
+	struct Token const *FirstTok = ExpectToken(Ps, TT_BKBEGIN);
+	if (!FirstTok)
+		return 1;
+	
+	struct Node List =
+	{
+		.Type = NT_EXPR_LIST
+	};
+	
+	for (;;)
+	{
+		struct Node Item = {0};
+		unsigned char Term[] = {TT_COMMA, TT_BKEND};
+		if (ParseExpr(&Item, Ps, Term, 2, 0))
+		{
+			Node_Destroy(&List);
+			return 1;
+		}
+		++Ps->i;
+		
+		Node_AddChild(&List, &Item);
+		
+		if (Ps->Lex->Toks[Ps->i].Type == TT_BKEND)
+			break;
+	}
+	
+	Node_AddToken(&List, FirstTok);
+	*Out = List;
 	
 	return 0;
 }

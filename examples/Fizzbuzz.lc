@@ -3,22 +3,23 @@ Import Std.Io
 Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Var i: Int32 Mut := 0
 	While i < 100
-		FizzBuzz(i)
+		; just an excuse to use type cast.
+		FizzBuzz(i As [Int64])
 		++i
 	End
 
 	Return 0
 End
 
-Proc FizzBuzz(n: Int32): Null
+Proc FizzBuzz(n: Int64): Null
 	Var Printed: Bool Mut := False
 
-	If n % 3 == 0
+	If n % 3'64 == 0'64
 		Print("fizz")
 		Printed := True
 	End
 
-	If n % 5 == 0
+	If n % 5'64 == 0'64
 		Print("buzz")
 		Printed := True
 	End

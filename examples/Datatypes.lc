@@ -49,14 +49,14 @@ Proc Vec.Add(Self, Rhs: Vec): Vec
 	End
 
 	Switch Self.Type
-		Case VecType.Vec2
+		Case [VecType.Vec2]
 			Out.Data.Vec2.x := Self.Data.Vec2.x + Rhs.Data.Vec2.x
 			Out.Data.Vec2.y := Self.Data.Vec2.y + Rhs.Data.Vec2.y
-		Case VecType.Vec3
+		Case [VecType.Vec3]
 			Out.Data.Vec3.x := Self.Data.Vec3.x + Rhs.Data.Vec3.x
 			Out.Data.Vec3.y := Self.Data.Vec3.y + Rhs.Data.Vec3.y
 			Out.Data.Vec3.z := Self.Data.Vec3.z + Rhs.Data.Vec3.z
-		Case VecType.Vec4
+		Case [VecType.Vec4]
 			Out.Data.Vec4.x := Self.Data.Vec4.x + Rhs.Data.Vec4.x
 			Out.Data.Vec4.y := Self.Data.Vec4.y + Rhs.Data.Vec4.y
 			Out.Data.Vec4.z := Self.Data.Vec4.z + Rhs.Data.Vec4.z
