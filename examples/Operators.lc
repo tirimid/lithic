@@ -15,14 +15,13 @@
 ; ^			address-of        ;
 ; .			element access    ;
 ; As			type cast         ;
-; .^.             deref-access      ;
+; .^			dereference       ;
 ; [RTL]--------------------------13 ;
 ; ++			pre increment     ;
 ; --			pre decrement     ;
 ; -			unary minus       ;
 ; !			logical NOT       ;
 ; ~			bitwise NOT       ;
-; ^			dereference       ;
 ; [LTR]--------------------------12 ;
 ; *			multiplication    ;
 ; /			division          ;

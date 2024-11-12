@@ -94,7 +94,7 @@ enum TokenType
 	TT_CARET,
 	TT_TRIPLE_PERIOD,
 	TT_PERIOD,
-	TT_PERIOD_CARET_PERIOD,
+	TT_PERIOD_CARET,
 	TT_MINUS,
 	TT_BANG,
 	TT_TILDE,
@@ -154,13 +154,12 @@ enum NodeType
 	NT_EXPR_ADDR_OF,
 	NT_EXPR_ACCESS,
 	NT_EXPR_CAST,
-	NT_EXPR_DEREF_ACCESS,
+	NT_EXPR_DEREF,
 	NT_EXPR_PRE_INC,
 	NT_EXPR_PRE_DEC,
 	NT_EXPR_UNARY_MINUS,
 	NT_EXPR_LOG_NOT,
 	NT_EXPR_BIT_NOT,
-	NT_EXPR_DEREF,
 	NT_EXPR_MUL,
 	NT_EXPR_DIV,
 	NT_EXPR_MOD,
@@ -317,7 +316,7 @@ struct BindPower
 
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
-static int ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len);
+static int ConvEscSequence(char const *Src, size_t SrcLen, size_t *i, char **Str, size_t *Len);
 static void DynStr_AppendChar(char **Str, size_t *Len, char Ch);
 static void DynStr_Init(char **Str, size_t *Len);
 static struct Token const *ExpectToken(struct ParseState *Ps, enum TokenType Type);
@@ -391,6 +390,32 @@ static struct StrNumLimit StrNumLimits[] =
 	{"ffffffff", 8, 16, SM_32},
 	{"ffffffffffffffff", 16, 16, SM_64},
 	{"ffffffffffffffff", 16, 16, SM_SIZE}
+};
+
+static int HexDigitValue[256] =
+{
+	['0'] = 0,
+	['1'] = 1,
+	['2'] = 2,
+	['3'] = 3,
+	['4'] = 4,
+	['5'] = 5,
+	['6'] = 6,
+	['7'] = 7,
+	['8'] = 8,
+	['9'] = 9,
+	['a'] = 10,
+	['A'] = 10,
+	['b'] = 11,
+	['B'] = 11,
+	['c'] = 12,
+	['C'] = 12,
+	['d'] = 13,
+	['D'] = 13,
+	['e'] = 14,
+	['E'] = 14,
+	['f'] = 15,
+	['F'] = 15
 };
 
 static char const *Keywords[] =
@@ -511,7 +536,7 @@ static char const *TokenTypeNames[] =
 	"TT_CARET",
 	"TT_TRIPLE_PERIOD",
 	"TT_PERIOD",
-	"TT_PERIOD_CARET_PERIOD",
+	"TT_PERIOD_CARET",
 	"TT_MINUS",
 	"TT_BANG",
 	"TT_TILDE",
@@ -568,16 +593,15 @@ static char const *NodeTypeNames[] =
 	"NT_EXPR_POST_DEC",
 	"NT_EXPR_CALL",
 	"NT_EXPR_NTH",
-	"NT_EXPR_DEREF",
+	"NT_EXPR_ADDR_OF",
 	"NT_EXPR_ACCESS",
 	"NT_EXPR_CAST",
-	"NT_EXPR_DEREF_ACCESS",
+	"NT_EXPR_DEREF",
 	"NT_EXPR_PRE_INC",
 	"NT_EXPR_PRE_DEC",
 	"NT_EXPR_UNARY_MINUS",
 	"NT_EXPR_LOG_NOT",
 	"NT_EXPR_BIT_NOT",
-	"NT_EXPR_ADDR_OF",
 	"NT_EXPR_MUL",
 	"NT_EXPR_DIV",
 	"NT_EXPR_MOD",
@@ -661,7 +685,7 @@ static struct BindPower ExprBindPower[] =
 	{27, 28}, // ^
 	{27, 28}, // .
 	{27, 28}, // As
-	{27, 28}, // .^.
+	{27, 28}, // .^
 	
 	// precedence group 13.
 	{26, 25}, // ++
@@ -669,7 +693,6 @@ static struct BindPower ExprBindPower[] =
 	{26, 25}, // -
 	{26, 25}, // !
 	{26, 25}, // ~
-	{26, 25}, // ^
 	
 	// precedence group 12.
 	{23, 24}, // *
@@ -898,7 +921,11 @@ Conf_Quit(void)
 }
 
 static int
-ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len)
+ConvEscSequence(char const *Src,
+                size_t SrcLen,
+                size_t *i,
+                char **Str,
+                size_t *Len)
 {
 	if (!strncmp(&Src[*i], "\\n", 2))
 	{
@@ -932,11 +959,39 @@ ConvEscSequence(char const *Src, size_t *i, char **Str, size_t *Len)
 	}
 	else if (!strncmp(&Src[*i], "\\b", 2))
 	{
-		// TODO: implement string binary sequences.
+		if (*i + 10 >= SrcLen)
+			return 1;
+		
+		uint8_t Val = 0;
+		for (size_t j = *i + 2; j < *i + 10; ++j)
+		{
+			if (!strchr("01", Src[j]))
+				return 1;
+			
+			Val <<= 1;
+			Val += Src[j] - '0';
+		}
+		
+		DynStr_AppendChar(Str, Len, Val);
+		*i += 10;
 	}
 	else if (!strncmp(&Src[*i], "\\x", 2))
 	{
-		// TODO: implement string hex sequences.
+		if (*i + 4 >= SrcLen)
+			return 1;
+		
+		uint8_t Val = 0;
+		for (size_t j = *i + 2; j < *i + 4; ++j)
+		{
+			if (!isxdigit(Src[j]))
+				return 1;
+			
+			Val <<= 4;
+			Val += HexDigitValue[(size_t)Src[j]];
+		}
+		
+		DynStr_AppendChar(Str, Len, Val);
+		*i += 4;
 	}
 	else
 		return 1;
@@ -1165,10 +1220,10 @@ Lex(struct LexData *Out, struct FileData const *Data)
 					LexData_AddSpecialChar(Out, i, 3, TT_TRIPLE_PERIOD);
 					i += 2;
 				}
-				else if (i + 2 < Data->Len && !strncmp(&Data->Data[i], ".^.", 3))
+				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], ".^", 2))
 				{
-					LexData_AddSpecialChar(Out, i, 3, TT_PERIOD_CARET_PERIOD);
-					i += 2;
+					LexData_AddSpecialChar(Out, i, 2, TT_PERIOD_CARET);
+					++i;
 				}
 				else
 					LexData_AddSpecialChar(Out, i, 1, TT_PERIOD);
@@ -1348,7 +1403,7 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 		}
 		else if (Data->Data[*i] == '\\')
 		{
-			if (ConvEscSequence(Data->Data, i, &ChData, &ChDataLen))
+			if (ConvEscSequence(Data->Data, Data->Len, i, &ChData, &ChDataLen))
 			{
 				LogProgErr(Data, Lb, "invalid escape in character - '%c'!", Data->Data[*i + 1]);
 				free(ChData);
@@ -1454,7 +1509,7 @@ LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 		}
 		else if (Data->Data[*i] == '\\')
 		{
-			if (ConvEscSequence(Data->Data, i, &StrData, &StrDataLen))
+			if (ConvEscSequence(Data->Data, Data->Len, i, &StrData, &StrDataLen))
 			{
 				LogProgErr(Data, Lb, "invalid escape in string - '%c'!", Data->Data[*i + 1]);
 				free(StrData);
@@ -2256,7 +2311,6 @@ ParseExprLed(struct Node *Out,
 	}
 	case NT_EXPR_NTH:
 	case NT_EXPR_ACCESS:
-	case NT_EXPR_DEREF_ACCESS:
 	case NT_EXPR_MUL:
 	case NT_EXPR_DIV:
 	case NT_EXPR_MOD:
@@ -2302,6 +2356,7 @@ ParseExprLed(struct Node *Out,
 	case NT_EXPR_POST_INC:
 	case NT_EXPR_POST_DEC:
 	case NT_EXPR_ADDR_OF:
+	case NT_EXPR_DEREF:
 		Node_AddChild(&NewLhs, Lhs);
 		Node_AddToken(&NewLhs, Tok);
 		break;
@@ -3213,32 +3268,6 @@ SkipParseNewlines(struct ParseState *Ps)
 static int
 StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB)
 {
-	static int DigitValue[256] =
-	{
-		['0'] = 0,
-		['1'] = 1,
-		['2'] = 2,
-		['3'] = 3,
-		['4'] = 4,
-		['5'] = 5,
-		['6'] = 6,
-		['7'] = 7,
-		['8'] = 8,
-		['9'] = 9,
-		['a'] = 10,
-		['A'] = 10,
-		['b'] = 11,
-		['B'] = 11,
-		['c'] = 12,
-		['C'] = 12,
-		['d'] = 13,
-		['D'] = 13,
-		['e'] = 14,
-		['E'] = 14,
-		['f'] = 15,
-		['F'] = 15
-	};
-	
 	if (LenA > LenB)
 		return 1;
 	else if (LenA < LenB)
@@ -3246,9 +3275,9 @@ StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB)
 	
 	for (size_t i = 0; i < LenA; ++i)
 	{
-		if (DigitValue[(size_t)a[i]] > DigitValue[(size_t)b[i]])
+		if (HexDigitValue[(size_t)a[i]] > HexDigitValue[(size_t)b[i]])
 			return 1;
-		else if (DigitValue[(size_t)a[i]] < DigitValue[(size_t)b[i]])
+		else if (HexDigitValue[(size_t)a[i]] < HexDigitValue[(size_t)b[i]])
 			return -1;
 	}
 	
@@ -3324,8 +3353,8 @@ TokenTypeToLed(enum TokenType Type)
 		return NT_EXPR_ACCESS;
 	case TT_KW_AS:
 		return NT_EXPR_CAST;
-	case TT_PERIOD_CARET_PERIOD:
-		return NT_EXPR_DEREF_ACCESS;
+	case TT_PERIOD_CARET:
+		return NT_EXPR_DEREF;
 	case TT_ASTERISK:
 		return NT_EXPR_MUL;
 	case TT_SLASH:
@@ -3420,8 +3449,6 @@ TokenTypeToNud(enum TokenType Type)
 		return NT_EXPR_LOG_NOT;
 	case TT_TILDE:
 		return NT_EXPR_BIT_NOT;
-	case TT_CARET:
-		return NT_EXPR_DEREF;
 	default:
 		return -1;
 	}
