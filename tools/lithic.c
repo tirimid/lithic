@@ -2078,6 +2078,32 @@ ParseArgList(struct Node *Out, struct ParseState *Ps)
 			ArgList.Flags |= NF_BASE;
 			ArgList.Flags |= NF_VARIADIC;
 			goto Done;
+		case TT_KW_SELF:
+		{
+			--Ps->i;
+			
+			struct Node ArgType = {0};
+			unsigned char Term[] = {TT_COMMA, TT_PEND};
+			if (ParseWrappedType(&ArgType, Ps, Term, 2))
+			{
+				Node_Destroy(&ArgList);
+				return 1;
+			}
+			
+			struct Node Arg =
+			{
+				.Type = NT_ARG
+			};
+			Node_AddChild(&Arg, &ArgType);
+			Node_AddToken(&Arg, Next);
+			
+			Node_AddChild(&ArgList, &Arg);
+			
+			if (Ps->Lex->Toks[Ps->i].Type == TT_PEND)
+				goto Done;
+			
+			break;
+		}
 		case TT_PEND:
 			if (PeekPrevToken(Ps)->Type == TT_COMMA)
 			{
@@ -2087,17 +2113,7 @@ ParseArgList(struct Node *Out, struct ParseState *Ps)
 			}
 			goto Done;
 		case TT_IDENT:
-			break;
-		default:
-			LogTokErr(Ps->File, Next, "expected TT_TRIPLE_PERIOD, TT_KW_BASE, or TT_IDENT!");
-			Node_Destroy(&ArgList);
-			return 1;
-		}
-		
-		// handle explicit argument.
 		{
-			struct Token const *Name = Next;
-			
 			if (!ExpectToken(Ps, TT_COLON))
 			{
 				Node_Destroy(&ArgList);
@@ -2117,12 +2133,19 @@ ParseArgList(struct Node *Out, struct ParseState *Ps)
 				.Type = NT_ARG
 			};
 			Node_AddChild(&Arg, &ArgType);
-			Node_AddToken(&Arg, Name);
+			Node_AddToken(&Arg, Next);
 			
 			Node_AddChild(&ArgList, &Arg);
 			
 			if (Ps->Lex->Toks[Ps->i].Type == TT_PEND)
-				break;
+				goto Done;
+			
+			break;
+		}
+		default:
+			LogTokErr(Ps->File, Next, "expected TT_TRIPLE_PERIOD, TT_KW_BASE, or TT_IDENT!");
+			Node_Destroy(&ArgList);
+			return 1;
 		}
 	}
 Done:
