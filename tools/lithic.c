@@ -145,6 +145,8 @@ enum NodeType
 	NT_EXPR_LAMBDA,
 	NT_EXPR_SIZEOF,
 	NT_EXPR_STRUCT,
+	NT_EXPR_UNION,
+	NT_EXPR_MEMB,
 	NT_EXPR_VARGCOUNT,
 	NT_EXPR_NULL,
 	NT_EXPR_POST_INC,
@@ -205,6 +207,7 @@ enum NodeType
 	NT_PROC,
 	NT_ARG_LIST,
 	NT_ARG,
+	NT_STATEMENT_LIST,
 	NT_VAR,
 	NT_COND_TREE,
 	NT_WHILE,
@@ -219,6 +222,7 @@ enum NodeType
 	NT_ENUM,
 	NT_UNION,
 	NT_MEMBER,
+	NT_ENUM_MEMBER,
 	NT_TYPE_ALIAS
 };
 
@@ -359,11 +363,12 @@ static int ParseProgram(struct Node *Out, struct ParseState *Ps);
 static int ParseResetVargs(struct Node *Out, struct ParseState *Ps);
 static int ParseReturn(struct Node *Out, struct ParseState *Ps);
 static int ParseStatement(struct Node *Out, struct ParseState *Ps);
-static int ParseStatements(struct Node *AppendTo, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
+static int ParseStatementList(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseStruct(struct Node *Out, struct ParseState *Ps);
 static int ParseSwitch(struct Node *Out, struct ParseState *Ps);
 static int ParseType(struct Node *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseTypeAlias(struct Node *Out, struct ParseState *Ps);
+static int ParseTypeLiteral(struct Node *Out, struct ParseState *Ps);
 static int ParseUnion(struct Node *Out, struct ParseState *Ps);
 static int ParseVar(struct Node *Out, struct ParseState *Ps);
 static int ParseWhile(struct Node *Out, struct ParseState *Ps);
@@ -601,6 +606,8 @@ static char const *NodeTypeNames[] =
 	"NT_EXPR_LAMBDA",
 	"NT_EXPR_SIZEOF",
 	"NT_EXPR_STRUCT",
+	"NT_EXPR_UNION",
+	"NT_EXPR_MEMB",
 	"NT_EXPR_VARGCOUNT",
 	"NT_EXPR_NULL",
 	"NT_EXPR_POST_INC",
@@ -661,6 +668,7 @@ static char const *NodeTypeNames[] =
 	"NT_PROC",
 	"NT_ARG_LIST",
 	"NT_ARG",
+	"NT_STATEMENT_LIST",
 	"NT_VAR",
 	"NT_COND_TREE",
 	"NT_WHILE",
@@ -675,6 +683,7 @@ static char const *NodeTypeNames[] =
 	"NT_ENUM",
 	"NT_UNION",
 	"NT_MEMBER",
+	"NT_ENUM_MEMBER",
 	"NT_TYPE_ALIAS"
 };
 
@@ -2181,18 +2190,18 @@ ParseBlock(struct Node *Out, struct ParseState *Ps)
 	}
 	
 	// block contents.
+	struct Node StmtList = {0};
 	{
 		unsigned char Term[] = {TT_KW_END};
-		if (ParseStatements(&Block, Ps, Term, 1))
-		{
-			Node_Destroy(&Block);
+		if (ParseStatementList(&StmtList, Ps, Term, 1))
 			return 1;
-		}
 	}
 	
+	Node_AddChild(&Block, &StmtList);
 	Node_AddToken(&Block, FirstTok);
 	if (Name)
 		Node_AddToken(&Block, Name);
+	
 	*Out = Block;
 	
 	return 0;
@@ -2230,8 +2239,88 @@ ParseBreak(struct Node *Out, struct ParseState *Ps)
 static int
 ParseCondTree(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement condition tree parse.
-	return 1;
+	struct Token const *FirstTok = RequireToken(Ps);
+	if (!FirstTok)
+		return 1;
+	
+	switch (FirstTok->Type)
+	{
+	case TT_KW_IF:
+	case TT_KW_ELIF:
+		break;
+	default:
+		LogTokErr(Ps->File, FirstTok, "expected either TT_KW_IF or TT_KW_ELIF for condition tree!");
+		return 1;
+	}
+	
+	struct Node CondTree =
+	{
+		.Type = NT_COND_TREE
+	};
+	
+	// necessary condition tree info.
+	{
+		struct Node Cond = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseWrappedExpr(&Cond, Ps, Term, 1))
+			return 1;
+		
+		Node_AddChild(&CondTree, &Cond);
+	}
+	
+	// condition tree body and children.
+	{
+		struct Node TruePath = {0};
+		unsigned char Term[] = {TT_KW_END, TT_KW_ELIF, TT_KW_ELSE};
+		if (ParseStatementList(&TruePath, Ps, Term, 3))
+		{
+			Node_Destroy(&CondTree);
+			return 1;
+		}
+		
+		Node_AddChild(&CondTree, &TruePath);
+		
+		switch (Ps->Lex->Toks[Ps->i].Type)
+		{
+		case TT_KW_END:
+			break;
+		case TT_KW_ELIF:
+		{
+			--Ps->i;
+			
+			struct Node FalsePath = {0};
+			if (ParseCondTree(&FalsePath, Ps))
+			{
+				Node_Destroy(&CondTree);
+				return 1;
+			}
+			
+			Node_AddChild(&CondTree, &FalsePath);
+			
+			break;
+		}
+		case TT_KW_ELSE:
+		{
+			struct Node FalsePath = {0};
+			unsigned char Term[] = {TT_KW_END};
+			if (ParseStatementList(&FalsePath, Ps, Term, 1))
+			{
+				Node_Destroy(&CondTree);
+				return 1;
+			}
+			
+			Node_AddChild(&CondTree, &FalsePath);
+			
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	
+	*Out = CondTree;
+	
+	return 0;
 }
 
 static int
@@ -2319,7 +2408,7 @@ ParseEnum(struct Node *Out, struct ParseState *Ps)
 		
 		struct Node Memb =
 		{
-			.Type = NT_MEMBER
+			.Type = NT_ENUM_MEMBER
 		};
 		
 		switch (Next->Type)
@@ -2524,9 +2613,7 @@ ParseExprLed(struct Node *Out,
 			return 1;
 		}
 		
-		if (Next->Type == TT_PEND)
-			++Ps->i;
-		else
+		if (Next->Type != TT_PEND)
 		{
 			--Ps->i;
 			
@@ -2724,19 +2811,23 @@ ParseExprNud(struct Node *Out,
 		}
 		Node_AddChild(&Lhs, &ReturnType);
 		
+		struct Node StmtList = {0};
 		unsigned char LambdaTerm[] = {TT_KW_END};
-		if (ParseStatements(&Lhs, Ps, LambdaTerm, 1))
+		if (ParseStatementList(&StmtList, Ps, LambdaTerm, 1))
 		{
 			Node_Destroy(&Lhs);
 			return 1;
 		}
+		Node_AddChild(&Lhs, &StmtList);
 		
 		Node_AddToken(&Lhs, Tok);
 		
 		break;
 	}
 	case NT_EXPR_STRUCT:
-		// TODO: implement struct literals in expressions.
+	case NT_EXPR_UNION:
+		if (ParseTypeLiteral(&Lhs, Ps))
+			return 1;
 		break;
 	case NT_EXPR_SIZEOF:
 	{
@@ -2980,12 +3071,15 @@ ParseProc(struct Node *Out, struct ParseState *Ps)
 	
 	// procedure contents.
 	{
+		struct Node StmtList = {0};
 		unsigned char Term[] = {TT_KW_END};
-		if (ParseStatements(&Proc, Ps, Term, 1))
+		if (ParseStatementList(&StmtList, Ps, Term, 1))
 		{
 			Node_Destroy(&Proc);
 			return 1;
 		}
+		
+		Node_AddChild(&Proc, &StmtList);
 	}
 	
 	*Out = Proc;
@@ -3187,11 +3281,16 @@ ParseStatement(struct Node *Out, struct ParseState *Ps)
 }
 
 static int
-ParseStatements(struct Node *AppendTo,
-                struct ParseState *Ps,
-                unsigned char const Term[],
-                size_t TermCnt)
+ParseStatementList(struct Node *Out,
+                   struct ParseState *Ps,
+                   unsigned char const Term[],
+                   size_t TermCnt)
 {
+	struct Node StmtList =
+	{
+		.Type = NT_STATEMENT_LIST
+	};
+	
 	for (;;)
 	{
 		SkipParseNewlines(Ps);
@@ -3208,12 +3307,15 @@ ParseStatements(struct Node *AppendTo,
 		
 		struct Node Stmt = {0};
 		if (ParseStatement(&Stmt, Ps))
+		{
+			Node_Destroy(&StmtList);
 			return 1;
+		}
 		
-		// caller's responsibility to ensure cleanup.
-		Node_AddChild(AppendTo, &Stmt);
+		Node_AddChild(&StmtList, &Stmt);
 	}
 Done:
+	*Out = StmtList;
 	
 	return 0;
 }
@@ -3546,6 +3648,98 @@ ParseTypeAlias(struct Node *Out, struct ParseState *Ps)
 }
 
 static int
+ParseTypeLiteral(struct Node *Out, struct ParseState *Ps)
+{
+	// assumes that current token is an expression Struct / Union.
+	struct Token const *FirstTok = &Ps->Lex->Toks[Ps->i];
+	if (FirstTok->Type != TT_KW_STRUCT && FirstTok->Type != TT_KW_UNION)
+	{
+		LogTokErr(Ps->File, FirstTok, "expected TT_KW_STRUCT or TT_KW_UNION in type literal!");
+		return 1;
+	}
+	
+	struct Token const *TypeName = ExpectToken(Ps, TT_IDENT);
+	if (!TypeName)
+		return 1;
+	
+	if (!ExpectToken(Ps, TT_NEWLINE))
+		return 1;
+	
+	struct Node TypeLiteral =
+	{
+		.Type = FirstTok->Type == TT_KW_STRUCT ? NT_EXPR_STRUCT : NT_EXPR_UNION
+	};
+	
+	// get member data.
+	for (;;)
+	{
+		struct Node Memb =
+		{
+			.Type = NT_EXPR_MEMB
+		};
+		
+		struct Token const *MembName = ExpectToken(Ps, TT_IDENT);
+		if (!MembName)
+		{
+			Node_Destroy(&TypeLiteral);
+			return 1;
+		}
+		
+		Node_AddToken(&Memb, MembName);
+		
+		struct Token const *Next = PeekToken(Ps);
+		while (Next && Next->Type == TT_PERIOD)
+		{
+			++Ps->i;
+			
+			MembName = ExpectToken(Ps, TT_IDENT);
+			if (!MembName)
+			{
+				Node_Destroy(&Memb);
+				Node_Destroy(&TypeLiteral);
+				return 1;
+			}
+			
+			Node_AddToken(&Memb, MembName);
+			
+			Next = PeekToken(Ps);
+		}
+		
+		if (!ExpectToken(Ps, TT_COLON_EQUAL))
+		{
+			Node_Destroy(&Memb);
+			Node_Destroy(&TypeLiteral);
+			return 1;
+		}
+		
+		struct Node Value = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseExpr(&Value, Ps, Term, 1, 0))
+		{
+			Node_Destroy(&Memb);
+			Node_Destroy(&TypeLiteral);
+			return 1;
+		}
+		++Ps->i;
+		
+		Node_AddChild(&Memb, &Value);
+		Node_AddChild(&TypeLiteral, &Memb);
+		
+		Next = PeekToken(Ps);
+		if (Next && Next->Type == TT_KW_END)
+		{
+			++Ps->i;
+			break;
+		}
+	}
+	
+	Node_AddToken(&TypeLiteral, FirstTok);
+	*Out = TypeLiteral;
+	
+	return 0;
+}
+
+static int
 ParseUnion(struct Node *Out, struct ParseState *Ps)
 {
 	if (!ExpectToken(Ps, TT_KW_UNION))
@@ -3736,12 +3930,15 @@ ParseWhile(struct Node *Out, struct ParseState *Ps)
 	
 	// get contained code.
 	{
+		struct Node StmtList = {0};
 		unsigned char Term[] = {TT_KW_END};
-		if (ParseStatements(&While, Ps, Term, 1))
+		if (ParseStatementList(&StmtList, Ps, Term, 1))
 		{
 			Node_Destroy(&While);
 			return 1;
 		}
+		
+		Node_AddChild(&While, &StmtList);
 	}
 	
 	*Out = While;
@@ -4007,6 +4204,8 @@ TokenTypeToNud(enum TokenType Type)
 		return NT_EXPR_LAMBDA;
 	case TT_KW_STRUCT:
 		return NT_EXPR_STRUCT;
+	case TT_KW_UNION:
+		return NT_EXPR_UNION;
 	case TT_KW_SIZEOF:
 		return NT_EXPR_SIZEOF;
 	case TT_KW_LENOF:

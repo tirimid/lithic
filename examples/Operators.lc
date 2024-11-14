@@ -2,7 +2,8 @@
 ;
 ; [***]--------------------------15 ;
 ; Proc		lambda expression ;
-; Struct		struct literal    ;
+; Struct		struct expression ;
+; Union		union expression  ;
 ; SizeOf    	size of           ;
 ; LenOf		length of         ;
 ; NextVarg		get next var arg  ;
