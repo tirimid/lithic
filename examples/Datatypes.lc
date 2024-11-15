@@ -74,15 +74,15 @@ End
 
 ; equivalent of static methods.
 Proc Vec.Create(Val: Float32): Vec
-;	Return Struct Vec
-;		Type := VecType.Vec4
-;		Data.Vec4 := Struct Vec4
-;			x := Val
-;			y := Val
-;			z := Val
-;			w := Val
-;		End
-;	End
+	Return Struct Vec
+		Type := VecType.Vec4
+		Data.Vec4 := Struct Vec4
+			x := Val
+			y := Val
+			z := Val
+			w := Val
+		End
+	End
 End
 
 ; method-style procedures can be declared in the following ways:

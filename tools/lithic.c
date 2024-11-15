@@ -3405,8 +3405,94 @@ ParseStruct(struct Node *Out, struct ParseState *Ps)
 static int
 ParseSwitch(struct Node *Out, struct ParseState *Ps)
 {
-	// TODO: implement switch statement parse.
-	return 1;
+	struct Token const *FirstTok = ExpectToken(Ps, TT_KW_SWITCH);
+	if (!FirstTok)
+		return 1;
+	
+	struct Node Switch =
+	{
+		.Type = NT_SWITCH
+	};
+	
+	// get what is being switched over.
+	{
+		struct Node Over = {0};
+		unsigned char Term[] = {TT_NEWLINE};
+		if (ParseWrappedExpr(&Over, Ps, Term, 1))
+			return 1;
+		
+		Node_AddChild(&Switch, &Over);
+	}
+	
+	// get case statements.
+	{
+		struct Token const *Which = RequireToken(Ps);
+		if (!Which)
+		{
+			Node_Destroy(&Switch);
+			return 1;
+		}
+		
+		if (Which->Type != TT_KW_CASE && Which->Type != TT_KW_BASE)
+		{
+			LogTokErr(Ps->File, Which, "expected either TT_KW_CASE or TT_KW_BASE!");
+			Node_Destroy(&Switch);
+			return 1;
+		}
+		
+		while (Which->Type == TT_KW_CASE)
+		{
+			struct Node Case =
+			{
+				.Type = NT_CASE
+			};
+			
+			struct Node Matches = {0};
+			unsigned char MatchTerm[] = {TT_NEWLINE};
+			if (ParseWrappedExpr(&Matches, Ps, MatchTerm, 1))
+			{
+				Node_Destroy(&Switch);
+				return 1;
+			}
+			
+			Node_AddChild(&Case, &Matches);
+			
+			struct Node StmtList = {0};
+			unsigned char StmtListTerm[] = {TT_KW_CASE, TT_KW_BASE};
+			if (ParseStatementList(&StmtList, Ps, StmtListTerm, 2))
+			{
+				Node_Destroy(&Case);
+				Node_Destroy(&Switch);
+				return 1;
+			}
+			
+			Node_AddChild(&Case, &StmtList);
+			Node_AddToken(&Case, Which);
+			
+			Node_AddChild(&Switch, &Case);
+			
+			Which = &Ps->Lex->Toks[Ps->i];
+		}
+	}
+	
+	// get base statement.
+	{
+		struct Node StmtList = {0};
+		unsigned char Term[] = {TT_KW_END};
+		if (ParseStatementList(&StmtList, Ps, Term, 1))
+		{
+			Node_Destroy(&Switch);
+			return 1;
+		}
+		
+		Node_AddChild(&Switch, &StmtList);
+	}
+	
+	Node_AddToken(&Switch, FirstTok);
+	
+	*Out = Switch;
+	
+	return 0;
 }
 
 static int
