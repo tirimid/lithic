@@ -1,5 +1,5 @@
 Struct *Error
-	Code: Int32
-	ExtraData: Uint8^
-	ExtraDataCleanup: Null(Uint8^)
+	Code Int32
+	ExtraData Uint8^
+	ExtraDataCleanup Null(Uint8^)
 End

@@ -1,5 +1,5 @@
 ; must be derived from an integer type.
-Enum VecType: Uint8
+Enum VecType Uint8
 	Vec2 := 2
 
 	Vec3 ; automatically increments to 3.
@@ -7,39 +7,39 @@ Enum VecType: Uint8
 End
 
 Struct Vec2
-	x: Float32
-	y: Float32
+	x Float32
+	y Float32
 End
 
 Struct Vec3
-	x: Float32
-	y: Float32
-	z: Float32
+	x Float32
+	y Float32
+	z Float32
 End
 
 Struct Vec4
-	x: Float32
-	y: Float32
-	z: Float32
-	w: Float32
+	x Float32
+	y Float32
+	z Float32
+	w Float32
 End
 
 Union VecN
 	; typenames are not stored in the same namespace as everything else.
 	; as such, you can name variables with the same name as their type.
-	Vec2: Vec2
-	Vec3: Vec3
-	Vec4: Vec4
+	Vec2 Vec2
+	Vec3 Vec3
+	Vec4 Vec4
 End
 
 Struct Vec
-	Data: VecN
-	Type: VecType
+	Data VecN
+	Type VecType
 End
 
 ; example method-style procedure.
 ; can be invoked using `SomeVec.Add(SomeOtherVec)`.
-Proc Vec.Add(Self, Rhs: Vec): Vec
+Proc Vec.Add(Self, Rhs Vec) Vec
 	If Self.Type != Rhs.Type
 		Return Null[Vec]
 	End
@@ -68,12 +68,12 @@ Proc Vec.Add(Self, Rhs: Vec): Vec
 End
 
 ; can be invoked using `SomeVec.AddAssign(SomeOtherVec)`.
-Proc Vec.AddAssign(Self Mut^, Rhs: Vec): Null
+Proc Vec.AddAssign(Self Mut^, Rhs Vec) Null
 	Self.^ := Self.^.Add(Rhs)
 End
 
 ; equivalent of static methods.
-Proc Vec.Create(Val: Float32): Vec
+Proc Vec.Create(Val Float32) Vec
 	Return Struct Vec
 		Type := VecType.Vec4
 		Data.Vec4 := Struct Vec4
@@ -98,7 +98,7 @@ End
 ; method-style procedures declared with `Self Mut^` can only be called on
 ; variables whose types are marked with `Mut`.
 
-Proc NullStructures(): Null
+Proc NullStructures() Null
 	Var Vec: Vec := Null[Vec]
 	If Vec == Null[Vec]
 		; `Vec` is fully zeroed.

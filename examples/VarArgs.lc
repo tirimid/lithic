@@ -1,6 +1,6 @@
 Import Std.Io
 
-Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+Proc *Main(Argc Int32, Argv Uint8^^) Int32
 	; test var arg print using `PrintAll()`.
 	PrintAll("hello", "world")
 	PrintAll("these", "words", "will", "form", "a", "sentence")
@@ -14,8 +14,8 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc PrintAll(...): Null
-	Var i: Usize Mut := 0's
+Proc PrintAll(...) Null
+	Var i Usize Mut := 0's
 	While i < VargCount
 		Print("{s} ", NextVarg[Uint8[]])
 		++i
@@ -23,12 +23,12 @@ Proc PrintAll(...): Null
 	Print("\n")
 End
 
-Proc MulAdd(Mul: Int32, ...): Int32
-	Var Sum: Int32 Mut := 0
+Proc MulAdd(Mul Int32, ...) Int32
+	Var Sum Int32 Mut := 0
 
-	Var i: Int32 Mut := 0
+	Var i Int32 Mut := 0
 	While i < Mul
-		Var j: Usize Mut := 0's
+		Var j Usize Mut := 0's
 		While j < VargCount
 			Sum += Mul * NextVarg[Int32]
 			++j
@@ -44,6 +44,6 @@ End
 ; function, without a count, meaning you must have an argument prior to them and
 ; cannot use `VargCount` within the function.
 ; this should be used for creating interfaces to external C functions.
-Proc CVarArgs(Something: Int32, Base ...): Null
+Proc CVarArgs(Something Int32, Base ...) Null
 	; do something.
 End

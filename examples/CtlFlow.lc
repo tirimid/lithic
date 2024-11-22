@@ -1,4 +1,4 @@
-Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+Proc *Main(Argc Int32, Argv Uint8^^) Int32
 	; if chain.
 	If False
 		DoSomething()
@@ -33,11 +33,28 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 		Base
 			DoSomething()
 	End
+	
+	; scope-based defer.
+	Block
+		Var a Thing := Thing.Create()
+		Defer a.Destroy()
+		
+		; ...
+		
+		Var Rc Int32 := DoSomething()
+		If Rc < 0
+			; `a` will be destroyed here.
+			; same goes for things like Break or Continue.
+			Return 1
+		End
+		
+		; `a` will be destroyed here.
+	End
 
 	; return statement.
 	Return 0
 End
 
-Proc DoSomething(): Null
+Proc DoSomething() Null
 	; implementation here...
 End

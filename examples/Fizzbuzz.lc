@@ -1,7 +1,7 @@
 Import Std.Io
 
-Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
-	Var i: Int32 Mut := 0
+Proc *Main(Argc Int32, Argv Uint8^^) Int32
+	Var i Int32 Mut := 0
 	While i < 100
 		; just an excuse to use type cast.
 		FizzBuzz(i As [Int64])
@@ -11,8 +11,8 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc FizzBuzz(n: Int64): Null
-	Var Printed: Bool Mut := False
+Proc FizzBuzz(n Int64) Null
+	Var Printed Bool Mut := False
 
 	If n % 3'64 == 0'64
 		Print("fizz")

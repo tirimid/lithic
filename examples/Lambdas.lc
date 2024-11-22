@@ -1,18 +1,18 @@
 Import Std.Io
 
-Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
-	Var CmpInt32: Int32(Uint8^, Uint8^) := Proc(Lhs: Uint8^, Rhs: Uint8^): Int32
-		Var PLhs: Int32^ := Lhs As [Int32^]
-		Var PRhs: Int32^ := Rhs As [Int32^]
+Proc *Main(Argc Int32, Argv Uint8^^) Int32
+	Var CmpInt32 Int32(Uint8^, Uint8^) := Proc(Lhs Uint8^, Rhs Uint8^) Int32
+		Var PLhs Int32^ := Lhs As [Int32^]
+		Var PRhs Int32^ := Rhs As [Int32^]
 		Return PRhs.^ - PLhs.^
 	End
 
-	Var PrintInt32: Null() := Proc(Ptr: Uint8^): Null
-		Var PInt: Int32^ := Ptr As [Int32^]
+	Var PrintInt32 Null() := Proc(Ptr Uint8^) Null
+		Var PInt Int32^ := Ptr As [Int32^]
 		Print("{i}\n", PInt.^)
 	End
 
-	Var Nums: Int32[] := [5, 3, 2, 4, 1]
+	Var Nums Int32[] := [5, 3, 2, 4, 1]
 
 	SortAll((Nums @ 0)^, SizeOf(Nums @ 0), LenOf(Nums), CmpInt32)
 	PrintAll((Nums @ 0)^, SizeOf(Nums @ 0), LenOf(Nums), PrintInt32)
@@ -20,11 +20,11 @@ Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
 	Return 0
 End
 
-Proc PrintAll(Buf: Uint8^, Size: Usize, Cnt: Usize, PrintItem: Null(Uint8^)): Null
+Proc PrintAll(Buf Uint8^, Size Usize, Cnt Usize, PrintItem Null(Uint8^)) Null
 	; ...
 End
 
-Proc SortAll(Buf: Uint8 Mut^, Size: Usize, Cnt: Usize, Cmp: Int32(Uint8^, Uint8^)): Null
+Proc SortAll(Buf Uint8 Mut^, Size Usize, Cnt Usize, Cmp Int32(Uint8^, Uint8^)) Null
 	; ...
 End
 

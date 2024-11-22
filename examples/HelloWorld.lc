@@ -1,6 +1,6 @@
 Import Std.Io
 
-Proc *Main(Argc: Int32, Argv: Uint8^^): Int32
+Proc *Main(Argc Int32, Argv Uint8^^) Int32
 	Print("hello world\n")
 	Return 0 ; implicit `'32` on untyped integer literals.
 End
