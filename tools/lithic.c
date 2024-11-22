@@ -9,6 +9,8 @@
 
 #include <dirent.h>
 #include <getopt.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #define MAX_MODULE_PATHS 32
@@ -241,7 +243,8 @@ enum ConfFlag
 {
 	CF_DUMP_TOKS = 0x1,
 	CF_DUMP_AST = 0x2,
-	CF_NO_FLOAT = 0x4
+	CF_TIME = 0x4,
+	CF_NO_FLOAT = 0x8
 };
 
 struct Conf
@@ -336,6 +339,16 @@ struct ModuleDataGroup
 	size_t ModuleCnt;
 };
 
+struct TimeData
+{
+	// begin and end timestamps for each key stage of transpilation.
+	uint64_t ConfReadBegin, ConfReadEnd;
+	uint64_t FileReadBegin, FileReadEnd;
+	uint64_t LexBegin, LexEnd;
+	uint64_t ParseBegin, ParseEnd;
+	uint64_t ExtractImportsBegin, ExtractImportsEnd;
+};
+
 static void AstNode_AddChild(struct AstNode *Node, struct AstNode const *Child);
 static void AstNode_AddToken(struct AstNode *Node, struct Token const *Tok);
 static void AstNode_Destroy(struct AstNode *Node);
@@ -351,6 +364,7 @@ static int ExtractImports(struct FileData const *File, struct ModuleDataGroup *A
 static void FileData_Destroy(struct FileData *Data);
 static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static char *FullPathname(char const *Path);
+static uint64_t GetUnixTimeMs(void);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
 static int LexChar(struct FileData const *Data, struct Token *Out, size_t *i);
@@ -402,6 +416,7 @@ static int ParseWrappedExpr(struct AstNode *Out, struct ParseState *Ps, unsigned
 static int ParseWrappedType(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static struct Token const *PeekPrevToken(struct ParseState const *Ps);
 static struct Token const *PeekToken(struct ParseState const *Ps);
+static void PrintTimeData(void);
 static char *ResolveImport(struct AstNode const *Import);
 static struct Token const *RequireToken(struct ParseState *Ps);
 static unsigned SizeModBits(enum SizeMod Mod);
@@ -806,50 +821,73 @@ static struct BindPower ExprBindPower[] =
 };
 
 static struct Conf Conf;
+static struct TimeData TimeData;
 
 int
 main(int Argc, char const *Argv[])
 {
-	if (Conf_Read(Argc, Argv))
-		return 1;
+	atexit(PrintTimeData);
 	
+	// read configuration.
+	{
+		TimeData.ConfReadBegin = GetUnixTimeMs();
+		if (Conf_Read(Argc, Argv))
+			return 1;
+		TimeData.ConfReadEnd = GetUnixTimeMs();
+	}
+	
+	// read input file.
 	struct FileData FileData = {0};
-	if (FileData_Read(&FileData, Conf.InFp, Conf.InFile))
-		return 1;
+	{
+		TimeData.FileReadBegin = GetUnixTimeMs();
+		if (FileData_Read(&FileData, Conf.InFp, Conf.InFile))
+			return 1;
+		TimeData.FileReadEnd = GetUnixTimeMs();
+	}
 	
+	// lex input file.
 	struct LexData LexData = {0};
-	if (Lex(&LexData, &FileData))
 	{
-		FileData_Destroy(&FileData);
-		return 1;
-	}
-	
-	if (Conf.Flags & CF_DUMP_TOKS)
-	{
-		for (size_t i = 0; i < LexData.TokCnt; ++i)
-			Token_Print(Conf.OutFp, &LexData.Toks[i], i);
+		TimeData.LexBegin = GetUnixTimeMs();
+		if (Lex(&LexData, &FileData))
+		{
+			FileData_Destroy(&FileData);
+			return 1;
+		}
+		TimeData.LexEnd = GetUnixTimeMs();
 		
-		LexData_Destroy(&LexData);
-		FileData_Destroy(&FileData);
-		return 0;
+		if (Conf.Flags & CF_DUMP_TOKS)
+		{
+			for (size_t i = 0; i < LexData.TokCnt; ++i)
+				Token_Print(Conf.OutFp, &LexData.Toks[i], i);
+			
+			LexData_Destroy(&LexData);
+			FileData_Destroy(&FileData);
+			return 0;
+		}
 	}
 	
+	// parse input file.
 	struct AstNode Ast = {0};
-	if (Parse(&Ast, &FileData, &LexData))
 	{
-		LexData_Destroy(&LexData);
-		FileData_Destroy(&FileData);
-		return 1;
-	}
-	
-	if (Conf.Flags & CF_DUMP_AST)
-	{
-		AstNode_Print(Conf.OutFp, &Ast, 0);
+		TimeData.ParseBegin = GetUnixTimeMs();
+		if (Parse(&Ast, &FileData, &LexData))
+		{
+			LexData_Destroy(&LexData);
+			FileData_Destroy(&FileData);
+			return 1;
+		}
+		TimeData.ParseEnd = GetUnixTimeMs();
 		
-		AstNode_Destroy(&Ast);
-		LexData_Destroy(&LexData);
-		FileData_Destroy(&FileData);
-		return 0;
+		if (Conf.Flags & CF_DUMP_AST)
+		{
+			AstNode_Print(Conf.OutFp, &Ast, 0);
+			
+			AstNode_Destroy(&Ast);
+			LexData_Destroy(&LexData);
+			FileData_Destroy(&FileData);
+			return 0;
+		}
 	}
 	
 	struct ModuleData ModuleData =
@@ -863,10 +901,15 @@ main(int Argc, char const *Argv[])
 	struct ModuleDataGroup ModuleDataGroup = {0};
 	ModuleDataGroup_Append(&ModuleDataGroup, &ModuleData);
 	
-	if (ExtractImports(&FileData, &ModuleDataGroup, &Ast, 0))
+	// extract and read imports.
 	{
-		ModuleDataGroup_Destroy(&ModuleDataGroup);
-		return 1;
+		TimeData.ExtractImportsBegin = GetUnixTimeMs();
+		if (ExtractImports(&FileData, &ModuleDataGroup, &Ast, 0))
+		{
+			ModuleDataGroup_Destroy(&ModuleDataGroup);
+			return 1;
+		}
+		TimeData.ExtractImportsBegin = GetUnixTimeMs();
 	}
 	
 	// TODO: implement rest of transpilation process.
@@ -954,13 +997,25 @@ Conf_Read(int Argc, char const *Argv[])
 {
 	atexit(Conf_Quit);
 	
+	struct option Opts[] =
+	{
+		{"ast", no_argument, NULL, 'a'},
+		{"conf", required_argument, NULL, 'c'},
+		{"help", no_argument, NULL, 'h'},
+		{"lex", no_argument, NULL, 'l'},
+		{"modpath", required_argument, NULL, 'm'},
+		{"out", required_argument, NULL, 'o'},
+		{"time", no_argument, NULL, 't'},
+		{0}
+	};
+	
 	// get option arguments.
-	int c;
-	while ((c = getopt(Argc, (char *const *)Argv, "Ac:hI:Lo:")) != -1)
+	int c, LongInd;
+	while ((c = getopt_long(Argc, (char *const *)Argv, "c:hm:o:", Opts, &LongInd)) != -1)
 	{
 		switch (c)
 		{
-		case 'A':
+		case 'a':
 			Conf.Flags |= CF_DUMP_AST;
 			break;
 		case 'c':
@@ -975,7 +1030,10 @@ Conf_Read(int Argc, char const *Argv[])
 		case 'h':
 			Usage(Argv[0]);
 			exit(0);
-		case 'I':
+		case 'l':
+			Conf.Flags |= CF_DUMP_TOKS;
+			break;
+		case 'm':
 		{
 			if (Conf.ModulePathCnt >= MAX_MODULE_PATHS)
 			{
@@ -996,9 +1054,6 @@ Conf_Read(int Argc, char const *Argv[])
 			
 			break;
 		}
-		case 'L':
-			Conf.Flags |= CF_DUMP_TOKS;
-			break;
 		case 'o':
 			if (Conf.OutFp)
 			{
@@ -1014,6 +1069,9 @@ Conf_Read(int Argc, char const *Argv[])
 				return 1;
 			}
 			
+			break;
+		case 't':
+			Conf.Flags |= CF_TIME;
 			break;
 		default:
 			Usage(Argv[0]);
@@ -1322,6 +1380,14 @@ FullPathname(char const *Path)
 	char PathBuf[PATH_MAX + 1] = {0};
 	realpath(Path, PathBuf);
 	return strdup(PathBuf);
+}
+
+static uint64_t
+GetUnixTimeMs(void)
+{
+	struct timeval Tv;
+	gettimeofday(&Tv, NULL);
+	return (uint64_t)Tv.tv_sec * 1000 + (uint64_t)Tv.tv_usec / 1000;
 }
 
 static bool
@@ -2247,7 +2313,9 @@ NextToken(struct ParseState *Ps)
 static FILE *
 OpenFile(char const *File, char const *Mode)
 {
-	// TODO: implement file checks for directories.
+	struct stat Stat;
+	if (stat(File, &Stat) || !S_ISREG(Stat.st_mode))
+		return NULL;
 	return fopen(File, Mode);
 }
 
@@ -4387,6 +4455,55 @@ PeekToken(struct ParseState const *Ps)
 	return Ps->i + 1 >= Ps->Lex->TokCnt ? NULL : &Ps->Lex->Toks[Ps->i + 1];
 }
 
+static void
+PrintTimeData(void)
+{
+	if (TimeData.ConfReadEnd)
+	{
+		fprintf(
+			stderr,
+			"conf read: %lums\n",
+			TimeData.ConfReadEnd - TimeData.ConfReadBegin
+		);
+	}
+	
+	if (TimeData.FileReadEnd)
+	{
+		fprintf(
+			stderr,
+			"file read: %lums\n",
+			TimeData.FileReadEnd - TimeData.FileReadBegin
+		);
+	}
+	
+	if (TimeData.LexEnd)
+	{
+		fprintf(
+			stderr,
+			"lex: %lums\n",
+			TimeData.LexEnd - TimeData.LexBegin
+		);
+	}
+	
+	if (TimeData.ParseEnd)
+	{
+		fprintf(
+			stderr,
+			"parse: %lums\n",
+			TimeData.ParseEnd - TimeData.ParseBegin
+		);
+	}
+	
+	if (TimeData.ExtractImportsEnd)
+	{
+		fprintf(
+			stderr,
+			"extract imports: %lums\n",
+			TimeData.ExtractImportsEnd - TimeData.ExtractImportsBegin
+		);
+	}
+}
+
 static char *
 ResolveImport(struct AstNode const *Import)
 {
@@ -4669,12 +4786,13 @@ Usage(char const *Name)
 		"\t%s [options] file\n"
 		"\n"
 		"options:\n"
-		"\t-A       dump the parsed out AST\n"
-		"\t-c flag  specify a language / transpiler flag\n"
-		"\t-h       display this help text\n"
-		"\t-I dir   add a module search directory\n"
-		"\t-L       dump the lexed tokens\n"
-		"\t-o file  write output to the specified file\n",
+		"\t--ast                  dump the parsed out AST\n"
+		"\t--conf flag, -c flag   specify a language / transpiler flag\n"
+		"\t--help, -h             display this help text\n"
+		"\t--lex                  dump the lexed tokens\n"
+		"\t--modpath dir, -m dir  add a module search directory\n"
+		"\t--out file, -o file    write output to the specified file\n"
+		"\t--time                 display time taken per transpile stage\n",
 		Name
 	);
 }

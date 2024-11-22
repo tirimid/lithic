@@ -44,7 +44,7 @@ Proc Vec.Add(Self, Rhs Vec) Vec
 		Return Null[Vec]
 	End
 
-	Var Out: Vec Mut := Struct Vec
+	Var Out Vec Mut := Struct Vec
 		Type := Self.Type
 	End
 
@@ -99,7 +99,7 @@ End
 ; variables whose types are marked with `Mut`.
 
 Proc NullStructures() Null
-	Var Vec: Vec := Null[Vec]
+	Var Vec Vec := Null[Vec]
 	If Vec == Null[Vec]
 		; `Vec` is fully zeroed.
 	Else
