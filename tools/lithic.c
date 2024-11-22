@@ -52,6 +52,7 @@ enum TokenType
 	TT_KW_FALSE,
 	TT_KW_FLOAT32,
 	TT_KW_FLOAT64,
+	TT_KW_FOR,
 	TT_KW_IF,
 	TT_KW_IMPORT,
 	TT_KW_INT8,
@@ -80,8 +81,7 @@ enum TokenType
 	TT_KW_USIZE,
 	TT_KW_VAR,
 	TT_KW_VARGCOUNT,
-	TT_KW_WHILE,
-	TT_KW_LAST__ = TT_KW_WHILE,
+	TT_KW_LAST__ = TT_KW_VARGCOUNT,
 	
 	// special characters.
 	TT_NEWLINE,
@@ -211,7 +211,7 @@ enum AstNodeType
 	ANT_STATEMENT_LIST,
 	ANT_VAR,
 	ANT_COND_TREE,
-	ANT_WHILE,
+	ANT_FOR,
 	ANT_BREAK,
 	ANT_CONTINUE,
 	ANT_BLOCK,
@@ -383,6 +383,7 @@ static int ParseExpr(struct AstNode *Out, struct ParseState *Ps, unsigned char c
 static int ParseExprLed(struct AstNode *Out, struct ParseState *Ps, struct AstNode const *Lhs, unsigned char const Term[], size_t TermCnt);
 static int ParseExprList(struct AstNode *Out, struct ParseState *Ps);
 static int ParseExprNud(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
+static int ParseFor(struct AstNode *Out, struct ParseState *Ps);
 static int ParseImport(struct AstNode *Out, struct ParseState *Ps);
 static int ParseProc(struct AstNode *Out, struct ParseState *Ps);
 static int ParseProgram(struct AstNode *Out, struct ParseState *Ps);
@@ -396,8 +397,7 @@ static int ParseType(struct AstNode *Out, struct ParseState *Ps, unsigned char c
 static int ParseTypeAlias(struct AstNode *Out, struct ParseState *Ps);
 static int ParseTypeLiteral(struct AstNode *Out, struct ParseState *Ps);
 static int ParseUnion(struct AstNode *Out, struct ParseState *Ps);
-static int ParseVar(struct AstNode *Out, struct ParseState *Ps);
-static int ParseWhile(struct AstNode *Out, struct ParseState *Ps);
+static int ParseVar(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseWrappedExpr(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static int ParseWrappedType(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
 static struct Token const *PeekPrevToken(struct ParseState const *Ps);
@@ -483,6 +483,7 @@ static char const *Keywords[] =
 	"False",
 	"Float32",
 	"Float64",
+	"For",
 	"If",
 	"Import",
 	"Int8",
@@ -510,8 +511,7 @@ static char const *Keywords[] =
 	"Union",
 	"Usize",
 	"Var",
-	"VargCount",
-	"While"
+	"VargCount"
 };
 
 static char const *TokenTypeNames[] =
@@ -542,6 +542,7 @@ static char const *TokenTypeNames[] =
 	"TT_KW_FALSE",
 	"TT_KW_FLOAT32",
 	"TT_KW_FLOAT64",
+	"TT_KW_FOR",
 	"TT_KW_IF",
 	"TT_KW_IMPORT",
 	"TT_KW_INT8",
@@ -570,7 +571,6 @@ static char const *TokenTypeNames[] =
 	"TT_KW_USIZE",
 	"TT_KW_VAR",
 	"TT_KW_VARGCOUNT",
-	"TT_KW_WHILE",
 	
 	// special characters.
 	"TT_NEWLINE",
@@ -700,7 +700,7 @@ static char const *NodeTypeNames[] =
 	"ANT_STATEMENT_LIST",
 	"ANT_VAR",
 	"ANT_COND_TREE",
-	"ANT_WHILE",
+	"ANT_FOR",
 	"ANT_BREAK",
 	"ANT_CONTINUE",
 	"ANT_BLOCK",
@@ -2588,18 +2588,12 @@ ParseDefer(struct AstNode *Out, struct ParseState *Ps)
 	if (!FirstTok)
 		return 1;
 	
-	struct Token const *Next = RequireToken(Ps);
-	if (!Next)
-		return 1;
-	
-	--Ps->i;
-	struct AstNode Value = {0};
-	unsigned char Term[] = {TT_NEWLINE};
-	if (ParseWrappedExpr(&Value, Ps, Term, 1))
+	struct AstNode Stmt = {0};
+	if (ParseStatement(&Stmt, Ps))
 		return 1;
 	
 	Out->Type = ANT_DEFER;
-	AstNode_AddChild(Out, &Value);
+	AstNode_AddChild(Out, &Stmt);
 	AstNode_AddToken(Out, FirstTok);
 	
 	return 0;
@@ -3200,6 +3194,119 @@ ParseExprNud(
 }
 
 static int
+ParseFor(struct AstNode *Out, struct ParseState *Ps)
+{
+	struct Token const *FirstTok = ExpectToken(Ps, TT_KW_FOR);
+	if (!FirstTok)
+		return 1;
+	
+	struct AstNode For =
+	{
+		.Type = ANT_FOR
+	};
+	AstNode_AddToken(&For, FirstTok);
+	
+	// get label data.
+	{
+		struct Token const *Next = PeekToken(Ps);
+		if (Next && Next->Type == TT_AT_QUOTE)
+		{
+			++Ps->i;
+			struct Token const *Name = ExpectToken(Ps, TT_IDENT);
+			if (!Name)
+			{
+				AstNode_Destroy(&For);
+				return 1;
+			}
+			AstNode_AddToken(&For, Name);
+		}
+	}
+	
+	// get condition / iteration parameters.
+	{
+		struct Token const *Next = PeekToken(Ps);
+		if (Next && Next->Type == TT_KW_VAR)
+		{
+			struct AstNode Init = {0};
+			unsigned char InitTerm[] = {TT_COMMA};
+			if (ParseVar(&Init, Ps, InitTerm, 1))
+			{
+				AstNode_Destroy(&For);
+				return 1;
+			}
+			AstNode_AddChild(&For, &Init);
+			
+			struct AstNode Cond = {0};
+			unsigned char CondTerm[] = {TT_COMMA};
+			if (ParseWrappedExpr(&Cond, Ps, CondTerm, 1))
+			{
+				AstNode_Destroy(&For);
+				return 1;
+			}
+			AstNode_AddChild(&For, &Cond);
+			
+			struct AstNode Inc = {0};
+			unsigned char IncTerm[] = {TT_NEWLINE};
+			if (ParseWrappedExpr(&Inc, Ps, IncTerm, 1))
+			{
+				AstNode_Destroy(&For);
+				return 1;
+			}
+			AstNode_AddChild(&For, &Inc);
+		}
+		else
+		{
+			struct AstNode FirstValue = {0};
+			unsigned char Term[] = {TT_NEWLINE, TT_COMMA};
+			if (ParseWrappedExpr(&FirstValue, Ps, Term, 2))
+			{
+				AstNode_Destroy(&For);
+				return 1;
+			}
+			AstNode_AddChild(&For, &FirstValue);
+			
+			if (Ps->Lex->Toks[Ps->i].Type == TT_COMMA)
+			{
+				struct AstNode Cond = {0};
+				unsigned char CondTerm[] = {TT_COMMA};
+				if (ParseWrappedExpr(&Cond, Ps, CondTerm, 1))
+				{
+					AstNode_Destroy(&For);
+					return 1;
+				}
+				AstNode_AddChild(&For, &Cond);
+				
+				struct AstNode Inc = {0};
+				unsigned char IncTerm[] = {TT_NEWLINE};
+				if (ParseWrappedExpr(&Inc, Ps, IncTerm, 1))
+				{
+					AstNode_Destroy(&For);
+					return 1;
+				}
+				AstNode_AddChild(&For, &Inc);
+			}
+		}
+	}
+	
+	// get contained code.
+	{
+		struct AstNode StmtList = {0};
+		unsigned char Term[] = {TT_KW_END};
+		if (ParseStatementList(&StmtList, Ps, Term, 1))
+		{
+			AstNode_Destroy(&For);
+			return 1;
+		}
+		
+		AstNode_AddChild(&For, &StmtList);
+	}
+	
+	*Out = For;
+	
+	return 0;
+}
+
+static int
 ParseImport(struct AstNode *Out, struct ParseState *Ps)
 {
 	if (!ExpectToken(Ps, TT_KW_IMPORT))
@@ -3369,7 +3476,8 @@ ParseProgram(struct AstNode *Out, struct ParseState *Ps)
 		case TT_KW_EXTERNVAR:
 		{
 			struct AstNode Child = {0};
-			if (ParseVar(&Child, Ps))
+			unsigned char Term[] = {TT_NEWLINE};
+			if (ParseVar(&Child, Ps, Term, 1))
 			{
 				AstNode_Destroy(Out);
 				return 1;
@@ -3506,6 +3614,8 @@ ParseStatement(struct AstNode *Out, struct ParseState *Ps)
 		return ParseContinue(Out, Ps);
 	case TT_KW_DEFER:
 		return ParseDefer(Out, Ps);
+	case TT_KW_FOR:
+		return ParseFor(Out, Ps);
 	case TT_KW_IF:
 		return ParseCondTree(Out, Ps);
 	case TT_KW_RESETVARGS:
@@ -3515,9 +3625,10 @@ ParseStatement(struct AstNode *Out, struct ParseState *Ps)
 	case TT_KW_SWITCH:
 		return ParseSwitch(Out, Ps);
 	case TT_KW_VAR:
-		return ParseVar(Out, Ps);
-	case TT_KW_WHILE:
-		return ParseWhile(Out, Ps);
+	{
+		unsigned char Term[] = {TT_NEWLINE};
+		return ParseVar(Out, Ps, Term, 1);
+	}
 	default:
 	{
 		unsigned char Term[] = {TT_NEWLINE};
@@ -4146,7 +4257,12 @@ ParseUnion(struct AstNode *Out, struct ParseState *Ps)
 }
 
 static int
-ParseVar(struct AstNode *Out, struct ParseState *Ps)
+ParseVar(
+	struct AstNode *Out,
+	struct ParseState *Ps,
+	unsigned char const Term[],
+	size_t TermCnt
+)
 {
 	struct Token const *VarDecl = RequireToken(Ps);
 	if (!VarDecl)
@@ -4183,8 +4299,13 @@ ParseVar(struct AstNode *Out, struct ParseState *Ps)
 			return 1;
 		
 		struct AstNode Type = {0};
-		unsigned char Term[] = {TT_NEWLINE, TT_COLON_EQUAL};
-		if (ParseWrappedType(&Type, Ps, Term, 2))
+		unsigned char *TypeTerm = malloc(TermCnt + 1);
+		memcpy(TypeTerm, Term, TermCnt);
+		TypeTerm[TermCnt] = TT_COLON_EQUAL;
+		
+		int Rc = ParseWrappedType(&Type, Ps, TypeTerm, TermCnt + 1);
+		free(TypeTerm);
+		if (Rc)
 			return 1;
 		
 		AstNode_AddChild(&Var, &Type);
@@ -4196,8 +4317,7 @@ ParseVar(struct AstNode *Out, struct ParseState *Ps)
 		if (Ps->Lex->Toks[Ps->i].Type == TT_COLON_EQUAL)
 		{
 			struct AstNode Value = {0};
-			unsigned char Term[] = {TT_NEWLINE};
-			if (ParseWrappedExpr(&Value, Ps, Term, 1))
+			if (ParseWrappedExpr(&Value, Ps, Term, TermCnt))
 			{
 				AstNode_Destroy(&Var);
 				return 1;
@@ -4208,61 +4328,6 @@ ParseVar(struct AstNode *Out, struct ParseState *Ps)
 	}
 	
 	*Out = Var;
-	
-	return 0;
-}
-
-static int
-ParseWhile(struct AstNode *Out, struct ParseState *Ps)
-{
-	struct Token const *FirstTok = ExpectToken(Ps, TT_KW_WHILE);
-	if (!FirstTok)
-		return 1;
-	
-	struct AstNode While =
-	{
-		.Type = ANT_WHILE
-	};
-	
-	// base while loop data.
-	{
-		struct Token const *Name = NULL;
-		
-		struct Token const *Next = PeekToken(Ps);
-		if (Next && Next->Type == TT_AT_QUOTE)
-		{
-			++Ps->i;
-			Name = ExpectToken(Ps, TT_IDENT);
-			if (!Name)
-				return 1;
-		}
-		
-		struct AstNode Cond = {0};
-		unsigned char Term[] = {TT_NEWLINE};
-		if (ParseWrappedExpr(&Cond, Ps, Term, 1))
-			return 1;
-		
-		AstNode_AddChild(&While, &Cond);
-		
-		AstNode_AddToken(&While, FirstTok);
-		if (Name)
-			AstNode_AddToken(&While, Name);
-	}
-	
-	// get contained code.
-	{
-		struct AstNode StmtList = {0};
-		unsigned char Term[] = {TT_KW_END};
-		if (ParseStatementList(&StmtList, Ps, Term, 1))
-		{
-			AstNode_Destroy(&While);
-			return 1;
-		}
-		
-		AstNode_AddChild(&While, &StmtList);
-	}
-	
-	*Out = While;
 	
 	return 0;
 }

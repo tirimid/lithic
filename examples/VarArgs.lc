@@ -16,7 +16,7 @@ End
 
 Proc PrintAll(...) Null
 	Var i Usize Mut := 0's
-	While i < VargCount
+	For i < VargCount
 		Print("{s} ", NextVarg[Uint8[]])
 		++i
 	End
@@ -27,11 +27,9 @@ Proc MulAdd(Mul Int32, ...) Int32
 	Var Sum Int32 Mut := 0
 
 	Var i Int32 Mut := 0
-	While i < Mul
-		Var j Usize Mut := 0's
-		While j < VargCount
+	For i < Mul
+		For Var j Usize Mut := 0's, j < VargCount, ++j
 			Sum += Mul * NextVarg[Int32]
-			++j
 		End
 		ResetVargs
 		++i

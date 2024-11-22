@@ -1,11 +1,9 @@
 Import Std.Io
 
 Proc *Main(Argc Int32, Argv Uint8^^) Int32
-	Var i Int32 Mut := 0
-	While i < 100
+	For Var i Int32 Mut := 0, i < 100, ++i
 		; just an excuse to use type cast.
 		FizzBuzz(i As [Int64])
-		++i
 	End
 
 	Return 0

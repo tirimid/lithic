@@ -8,8 +8,8 @@ Proc *Main(Argc Int32, Argv Uint8^^) Int32
 		DoSomething()
 	End
 
-	; while loop
-	While False
+	; non-iterative for loop (traditionally called while).
+	For False
 		DoSomething()
 		Break
 		Continue
@@ -49,6 +49,11 @@ Proc *Main(Argc Int32, Argv Uint8^^) Int32
 		End
 		
 		; `a` will be destroyed here.
+	End
+
+	; iteration-based for statement (C-style for).
+	For Var i Int32 Mut := 0, i < 100, ++i
+		DoSomethingWith(i)
 	End
 
 	; return statement.
