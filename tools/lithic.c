@@ -347,15 +347,38 @@ struct TimeData
 	uint64_t LexBegin, LexEnd;
 	uint64_t ParseBegin, ParseEnd;
 	uint64_t ExtractImportsBegin, ExtractImportsEnd;
+	uint64_t CheckAcyclicityBegin, CheckAcyclicityEnd;
+};
+
+struct DepNode
+{
+	char *Name;
+	struct AstNode const *Declaration;
+};
+
+struct DepGraph
+{
+	struct DepNode *Nodes;
+	size_t NodeCnt;
+	uint8_t *Adjacency;
+	size_t AdjacencySize;
 };
 
 static void AstNode_AddChild(struct AstNode *Node, struct AstNode const *Child);
 static void AstNode_AddToken(struct AstNode *Node, struct Token const *Tok);
 static void AstNode_Destroy(struct AstNode *Node);
 static void AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth);
+static int CheckAcyclicity(struct ModuleDataGroup const *Modules);
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
 static int ConvEscSequence(char const *Src, size_t SrcLen, size_t *i, char **Str, size_t *Len);
+static struct DepNode const *DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node);
+static void DepGraph_Connect(struct DepGraph *Graph, struct DepNode const *From, struct DepNode const *To);
+static void DepGraph_Destroy(struct DepGraph *Graph);
+static bool DepGraph_GetAdjacencyIndex(struct DepGraph const *Graph, size_t Row, size_t Col);
+static bool DepGraph_SearchEdge(struct DepGraph const *Graph, struct DepNode const *From, struct DepNode const *To);
+static struct DepNode const *DepGraph_SearchNode(struct DepGraph const *Graph, char const *Name);
+static void DepGraph_SetAdjacencyIndex(struct DepGraph *Graph, size_t Row, size_t Col, bool Val);
 static void DynStr_AppendChar(char **Str, size_t *Len, char Ch);
 static void DynStr_AppendStr(char **Str, size_t *Len, char const *Append);
 static void DynStr_Init(char **Str, size_t *Len);
@@ -912,6 +935,17 @@ main(int Argc, char const *Argv[])
 		TimeData.ExtractImportsBegin = GetUnixTimeMs();
 	}
 	
+	// check acyclicity of language elements where necessary.
+	{
+		TimeData.CheckAcyclicityBegin = GetUnixTimeMs();
+		if (CheckAcyclicity(&ModuleDataGroup))
+		{
+			ModuleDataGroup_Destroy(&ModuleDataGroup);
+			return 1;
+		}
+		TimeData.CheckAcyclicityEnd = GetUnixTimeMs();
+	}
+	
 	// TODO: implement rest of transpilation process.
 	
 	ModuleDataGroup_Destroy(&ModuleDataGroup);
@@ -990,6 +1024,13 @@ AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth)
 		for (size_t i = 0; i < Node->ChildCnt; ++i)
 			AstNode_Print(Fp, &Node->Children[i], Depth + 1);
 	}
+}
+
+static int
+CheckAcyclicity(struct ModuleDataGroup const *Modules)
+{
+	// TODO: implement acyclicity check for types.
+	return 1;
 }
 
 static int
@@ -1200,6 +1241,140 @@ ConvEscSequence(
 		return 1;
 	
 	return 0;
+}
+
+static struct DepNode const *
+DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node)
+{
+	// copy node.
+	{
+		++Graph->NodeCnt;
+		Graph->Nodes = reallocarray(
+			Graph->Nodes,
+			Graph->NodeCnt,
+			sizeof(struct DepNode)
+		);
+		Graph->Nodes[Graph->NodeCnt - 1] = *Node;
+	}
+	
+	// if adjacency matrix not allocated yet, just create it and stop.
+	{
+		if (Graph->NodeCnt == 1)
+		{
+			Graph->Adjacency = malloc(1);
+			Graph->Adjacency[0] = 0;
+			Graph->AdjacencySize = 1;
+			return &Graph->Nodes[Graph->NodeCnt - 1];
+		}
+	}
+	
+	// allocate / move new memory in adjacency matrix if needed.
+	{
+		size_t OldRowSizeBytes = (Graph->NodeCnt - 1 + 7) / 8;
+		size_t NewRowSizeBytes = (Graph->NodeCnt + 7) / 8;
+		size_t MvRegionSizeBytes = (Graph->NodeCnt - 1) * Graph->NodeCnt;
+		
+		if (NewRowSizeBytes > OldRowSizeBytes)
+		{
+			Graph->Adjacency = realloc(
+				Graph->Adjacency,
+				NewRowSizeBytes * NewRowSizeBytes
+			);
+			
+			for (size_t i = OldRowSizeBytes; i < MvRegionSizeBytes; i += NewRowSizeBytes)
+			{
+				memmove(
+					&Graph->Adjacency[i + 1],
+					&Graph->Adjacency[i],
+					OldRowSizeBytes
+				);
+				Graph->Adjacency[i] = 0;
+			}
+			
+			memset(
+				&Graph->Adjacency[MvRegionSizeBytes],
+				0,
+				NewRowSizeBytes
+			);
+		}
+	}
+	
+	return &Graph->Nodes[Graph->NodeCnt - 1];
+}
+
+static void
+DepGraph_Connect(
+	struct DepGraph *Graph,
+	struct DepNode const *From,
+	struct DepNode const *To
+)
+{
+	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
+	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
+	DepGraph_SetAdjacencyIndex(Graph, FromInd, ToInd, true);
+}
+
+static void
+DepGraph_Destroy(struct DepGraph *Graph)
+{
+	// node-specific resource release.
+	{
+		for (size_t i = 0; i < Graph->NodeCnt; ++i)
+			free(Graph->Nodes[i].Name);
+	}
+	
+	// graph-whole resource release.
+	{
+		free(Graph->Nodes);
+		free(Graph->Adjacency);
+	}
+}
+
+static bool
+DepGraph_GetAdjacencyIndex(struct DepGraph const *Graph, size_t Row, size_t Col)
+{
+	size_t RowSize = (Graph->NodeCnt + 7) / 8;
+	size_t ColByte = Col / 8, ColBit = Col % 8;
+	uint8_t Byte = Graph->Adjacency[Row * RowSize + ColByte];
+	return !!(Byte & 1 << ColBit);
+}
+
+static bool
+DepGraph_SearchEdge(
+	struct DepGraph const *Graph,
+	struct DepNode const *From,
+	struct DepNode const *To
+)
+{
+	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
+	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
+	return DepGraph_GetAdjacencyIndex(Graph, FromInd, ToInd);
+}
+
+static struct DepNode const *
+DepGraph_SearchNode(struct DepGraph const *Graph, char const *Name)
+{
+	for (size_t i = 0; i < Graph->NodeCnt; ++i)
+	{
+		if (!strcmp(Graph->Nodes[i].Name, Name))
+			return &Graph->Nodes[i];
+	}
+	return NULL;
+}
+
+static void
+DepGraph_SetAdjacencyIndex(
+	struct DepGraph *Graph,
+	size_t Row,
+	size_t Col,
+	bool Val
+)
+{
+	size_t RowSize = (Graph->NodeCnt + 7) / 8;
+	size_t ColByte = Col / 8, ColBit = Col % 8;
+	uint8_t *Byte = &Graph->Adjacency[Row * RowSize + ColByte];
+	*Byte &= ~(1 << ColBit);
+	*Byte |= Val << ColBit;
 }
 
 static void
@@ -4458,6 +4633,9 @@ PeekToken(struct ParseState const *Ps)
 static void
 PrintTimeData(void)
 {
+	if ((Conf.Flags & CF_TIME) == 0)
+		return;
+	
 	if (TimeData.ConfReadEnd)
 	{
 		fprintf(
@@ -4500,6 +4678,15 @@ PrintTimeData(void)
 			stderr,
 			"extract imports: %lums\n",
 			TimeData.ExtractImportsEnd - TimeData.ExtractImportsBegin
+		);
+	}
+	
+	if (TimeData.CheckAcyclicityEnd)
+	{
+		fprintf(
+			stderr,
+			"check acyclicity: %lums\n",
+			TimeData.CheckAcyclicityEnd - TimeData.CheckAcyclicityBegin
 		);
 	}
 }
