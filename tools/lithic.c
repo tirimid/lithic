@@ -366,14 +366,14 @@ struct DepNode
 	char *Name;
 	struct AstNode const *DeclNode;
 	struct FileData const *DeclFile;
+	bool Visited; // read / written for easy cycle detection.
 };
 
 struct DepGraph
 {
 	struct DepNode *Nodes;
 	size_t NodeCnt;
-	uint8_t *Adjacency;
-	size_t AdjacencySize;
+	bool *Adjacency;
 };
 
 struct SymtabEntry
@@ -398,17 +398,17 @@ static void AstNode_AddToken(struct AstNode *Node, struct Token const *Tok);
 static void AstNode_Destroy(struct AstNode *Node);
 static void AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth);
 static int BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules);
-static int CheckAcyclicity(struct ModuleDataGroup const *Modules);
+static int CheckAcyclicity(struct Symtab const *Symtab);
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
 static int ConvEscSequence(char const *Src, size_t SrcLen, size_t *i, char **Str, size_t *Len);
 static struct DepNode const *DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node);
 static void DepGraph_Connect(struct DepGraph *Graph, struct DepNode const *From, struct DepNode const *To);
 static void DepGraph_Destroy(struct DepGraph *Graph);
-static bool DepGraph_GetAdjacencyIndex(struct DepGraph const *Graph, size_t Row, size_t Col);
+static struct DepNode const *DepGraph_FindCycle(struct DepGraph *Graph, struct DepNode const *Src, struct DepNode *Cur);
+static void DepGraph_ResetVisited(struct DepGraph *Graph);
 static bool DepGraph_SearchEdge(struct DepGraph const *Graph, struct DepNode const *From, struct DepNode const *To);
 static struct DepNode const *DepGraph_SearchNode(struct DepGraph const *Graph, char const *Name);
-static void DepGraph_SetAdjacencyIndex(struct DepGraph *Graph, size_t Row, size_t Col, bool Val);
 static void DynStr_AppendChar(char **Str, size_t *Len, char Ch);
 static void DynStr_AppendStr(char **Str, size_t *Len, char const *Append);
 static void DynStr_Init(char **Str, size_t *Len);
@@ -417,6 +417,7 @@ static int ExtractImports(struct FileData const *File, struct ModuleDataGroup *A
 static void FileData_Destroy(struct FileData *Data);
 static int FileData_Read(struct FileData *Out, FILE *Fp, char const *File);
 static char *FullPathname(char const *Path);
+static struct AstNode const *GetSizeBaseType(struct AstNode const *Type);
 static uint64_t GetUnixTimeMs(void);
 static bool IsIdentInit(char ch);
 static int Lex(struct LexData *Out, struct FileData const *Data);
@@ -695,7 +696,7 @@ static char const *TokenTypeNames[] =
 	"TT_COMMA"
 };
 
-static char const *NodeTypeNames[] =
+static char const *AstNodeTypeNames[] =
 {
 	"ANT_PROGRAM",
 	
@@ -986,7 +987,7 @@ main(int Argc, char const *Argv[])
 	// check acyclicity of language elements where necessary.
 	{
 		TimeData.CheckAcyclicityBegin = GetUnixTimeMs();
-		if (CheckAcyclicity(&ModuleDataGroup))
+		if (CheckAcyclicity(&Symtab))
 		{
 			Symtab_Destroy(&Symtab);
 			ModuleDataGroup_Destroy(&ModuleDataGroup);
@@ -1053,7 +1054,7 @@ AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth)
 		fprintf(
 			Fp,
 			"%s (%c%c%c%c%c%c)\n",
-			NodeTypeNames[Node->Type],
+			AstNodeTypeNames[Node->Type],
 			Node->Flags & ANF_PUBLIC ? 'P' : '-',
 			Node->Flags & ANF_EXTERN ? 'E' : '-',
 			Node->Flags & ANF_MUT ? 'M' : '-',
@@ -1082,7 +1083,7 @@ BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules)
 {
 	struct Symtab Symtab = {0};
 	
-	// register symbols from main module.
+	// register symbols.
 	{
 		struct AstNode const *Ast = &Modules->Modules[0].Ast;
 		struct FileData const *File = &Modules->Modules[0].File;
@@ -1094,10 +1095,7 @@ BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules)
 				return 1;
 			}
 		}
-	}
-	
-	// register symbols from imported modules.
-	{
+		
 		for (size_t i = 1; i < Modules->ModuleCnt; ++i)
 		{
 			struct AstNode const *Ast = &Modules->Modules[i].Ast;
@@ -1118,28 +1116,73 @@ BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules)
 }
 
 static int
-CheckAcyclicity(struct ModuleDataGroup const *Modules)
+CheckAcyclicity(struct Symtab const *Symtab)
 {
-	// register nodes from main module.
+	struct DepGraph Graph = {0};
+	
+	// register nodes and edges.
 	{
+		for (size_t i = 0; i < Symtab->TypeCnt; ++i)
+		{
+			struct DepNode DepNode =
+			{
+				.Name = strdup(Symtab->Types[i].Name),
+				.DeclNode = Symtab->Types[i].DeclNode,
+				.DeclFile = Symtab->Types[i].DeclFile
+			};
+			DepGraph_AddNode(&Graph, &DepNode);
+		}
+		
+		for (size_t i = 0; i < Symtab->TypeCnt; ++i)
+		{
+			// this is only relevant for structs / unions.
+			if (Symtab->Types[i].Type != SET_STRUCT
+				&& Symtab->Types[i].Type != SET_UNION)
+			{
+				continue;
+			}
+			
+			struct DepNode const *DepNode = &Graph.Nodes[i];
+			struct AstNode const *AstNode = DepNode->DeclNode;
+			
+			for (size_t j = 0; j < AstNode->ChildCnt; ++j)
+			{
+				struct AstNode const *Memb = &AstNode->Children[j];
+				struct AstNode const *Base = GetSizeBaseType(&Memb->Children[0]);
+				if (!Base || Base->Type != ANT_TYPE_ATOM)
+					continue;
+				
+				char const *BaseName = Base->Toks[0]->Data.Str.Text;
+				if (!BaseName)
+					continue;
+				
+				struct DepNode const *BaseDep = DepGraph_SearchNode(&Graph, BaseName);
+				if (BaseDep)
+					DepGraph_Connect(&Graph, DepNode, BaseDep);
+			}
+		}
 	}
 	
-	// registers nodes from imported modules.
+	// check for edge cycles between nodes.
 	{
+		for (size_t i = 0; i < Graph.NodeCnt; ++i)
+		{
+			struct DepNode const *Node = &Graph.Nodes[i];
+			
+			DepGraph_ResetVisited(&Graph);
+			struct DepNode const *Cycle = DepGraph_FindCycle(&Graph, Node, &Graph.Nodes[i]);
+			if (Cycle)
+			{
+				LogAstNodeErr(Node->DeclFile, Node->DeclNode, "type contains cyclical definition!");
+				LogAstNodeContext(Cycle->DeclFile, Cycle->DeclNode, "by virtue of containing this type:");
+				DepGraph_Destroy(&Graph);
+				return 1;
+			}
+		}
 	}
 	
-	// register edges from main module.
-	{
-	}
-	
-	// register edges from imported modules.
-	{
-	}
-	
-	// TODO: finish implementing acyclicity check for types.
-	// TODO: check values as well as types for acyclicity.
-	
-	return 1;
+	DepGraph_Destroy(&Graph);
+	return 0;
 }
 
 static int
@@ -1371,17 +1414,16 @@ DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node)
 		if (Graph->NodeCnt == 1)
 		{
 			Graph->Adjacency = malloc(1);
-			Graph->Adjacency[0] = 0;
-			Graph->AdjacencySize = 1;
+			Graph->Adjacency[0] = false;
 			return &Graph->Nodes[Graph->NodeCnt - 1];
 		}
 	}
 	
 	// allocate / move new memory in adjacency matrix if needed.
 	{
-		size_t OldRowSizeBytes = (Graph->NodeCnt - 1 + 7) / 8;
-		size_t NewRowSizeBytes = (Graph->NodeCnt + 7) / 8;
-		size_t MvRegionSizeBytes = (Graph->NodeCnt - 1) * Graph->NodeCnt;
+		size_t OldRowSizeBytes = Graph->NodeCnt - 1;
+		size_t NewRowSizeBytes = Graph->NodeCnt;
+		size_t MvRegionSizeBytes = OldRowSizeBytes * NewRowSizeBytes;
 		
 		if (NewRowSizeBytes > OldRowSizeBytes)
 		{
@@ -1397,11 +1439,11 @@ DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node)
 					&Graph->Adjacency[i],
 					OldRowSizeBytes
 				);
-				Graph->Adjacency[i] = 0;
+				Graph->Adjacency[i] = false;
 			}
 			
 			memset(
-				&Graph->Adjacency[MvRegionSizeBytes],
+				&Graph->Adjacency[NewRowSizeBytes * (NewRowSizeBytes - 1)],
 				0,
 				NewRowSizeBytes
 			);
@@ -1418,9 +1460,9 @@ DepGraph_Connect(
 	struct DepNode const *To
 )
 {
-	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
-	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
-	DepGraph_SetAdjacencyIndex(Graph, FromInd, ToInd, true);
+	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Nodes) / sizeof(struct DepNode);
+	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Nodes) / sizeof(struct DepNode);
+	Graph->Adjacency[FromInd * Graph->NodeCnt + ToInd] = true;
 }
 
 static void
@@ -1439,13 +1481,36 @@ DepGraph_Destroy(struct DepGraph *Graph)
 	}
 }
 
-static bool
-DepGraph_GetAdjacencyIndex(struct DepGraph const *Graph, size_t Row, size_t Col)
+static struct DepNode const *
+DepGraph_FindCycle(
+	struct DepGraph *Graph,
+	struct DepNode const *Src,
+	struct DepNode *Cur
+)
 {
-	size_t RowSize = (Graph->NodeCnt + 7) / 8;
-	size_t ColByte = Col / 8, ColBit = Col % 8;
-	uint8_t Byte = Graph->Adjacency[Row * RowSize + ColByte];
-	return !!(Byte & 1 << ColBit);
+	if (DepGraph_SearchEdge(Graph, Cur, Src))
+		return Cur;
+	
+	Cur->Visited = true;
+	for (size_t i = 0; i < Graph->NodeCnt; ++i)
+	{
+		struct DepNode *Node = &Graph->Nodes[i];
+		if (!Node->Visited && DepGraph_SearchEdge(Graph, Cur, Node))
+		{
+			struct DepNode const *Cycle = DepGraph_FindCycle(Graph, Src, Node);
+			if (Cycle)
+				return Cycle;
+		}
+	}
+	
+	return NULL;
+}
+
+static void
+DepGraph_ResetVisited(struct DepGraph *Graph)
+{
+	for (size_t i = 0; i < Graph->NodeCnt; ++i)
+		Graph->Nodes[i].Visited = false;
 }
 
 static bool
@@ -1455,9 +1520,9 @@ DepGraph_SearchEdge(
 	struct DepNode const *To
 )
 {
-	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
-	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Adjacency) / sizeof(struct DepNode);
-	return DepGraph_GetAdjacencyIndex(Graph, FromInd, ToInd);
+	size_t FromInd = ((uintptr_t)From - (uintptr_t)Graph->Nodes) / sizeof(struct DepNode);
+	size_t ToInd = ((uintptr_t)To - (uintptr_t)Graph->Nodes) / sizeof(struct DepNode);
+	return Graph->Adjacency[FromInd * Graph->NodeCnt + ToInd];
 }
 
 static struct DepNode const *
@@ -1469,21 +1534,6 @@ DepGraph_SearchNode(struct DepGraph const *Graph, char const *Name)
 			return &Graph->Nodes[i];
 	}
 	return NULL;
-}
-
-static void
-DepGraph_SetAdjacencyIndex(
-	struct DepGraph *Graph,
-	size_t Row,
-	size_t Col,
-	bool Val
-)
-{
-	size_t RowSize = (Graph->NodeCnt + 7) / 8;
-	size_t ColByte = Col / 8, ColBit = Col % 8;
-	uint8_t *Byte = &Graph->Adjacency[Row * RowSize + ColByte];
-	*Byte &= ~(1 << ColBit);
-	*Byte |= Val << ColBit;
 }
 
 static void
@@ -1664,6 +1714,24 @@ FullPathname(char const *Path)
 	char PathBuf[PATH_MAX + 1] = {0};
 	realpath(Path, PathBuf);
 	return strdup(PathBuf);
+}
+
+static struct AstNode const *
+GetSizeBaseType(struct AstNode const *Type)
+{
+	switch (Type->Type)
+	{
+	case ANT_TYPE:
+	case ANT_TYPE_BUFFER:
+		return GetSizeBaseType(&Type->Children[0]);
+	case ANT_TYPE_ATOM:
+	case ANT_TYPE_PTR:
+	case ANT_TYPE_PROC:
+	case ANT_TYPE_ARRAY:
+		return Type;
+	default:
+		return NULL;
+	}
 }
 
 static uint64_t
@@ -4762,8 +4830,10 @@ PeekToken(struct ParseState const *Ps)
 static void
 PrintTimeData(void)
 {
-	if ((Conf.Flags & CF_TIME) == 0)
+	if (!(Conf.Flags & CF_TIME))
 		return;
+	
+	uint64_t Begin = TimeData.ConfReadBegin, End = 0;
 	
 	if (TimeData.ConfReadEnd)
 	{
@@ -4772,6 +4842,7 @@ PrintTimeData(void)
 			"conf read             %lums\n",
 			TimeData.ConfReadEnd - TimeData.ConfReadBegin
 		);
+		End = TimeData.ConfReadEnd;
 	}
 	
 	if (TimeData.FileReadEnd)
@@ -4781,6 +4852,7 @@ PrintTimeData(void)
 			"file read             %lums\n",
 			TimeData.FileReadEnd - TimeData.FileReadBegin
 		);
+		End = TimeData.FileReadEnd;
 	}
 	
 	if (TimeData.LexEnd)
@@ -4790,6 +4862,7 @@ PrintTimeData(void)
 			"lex                   %lums\n",
 			TimeData.LexEnd - TimeData.LexBegin
 		);
+		End = TimeData.LexEnd;
 	}
 	
 	if (TimeData.ParseEnd)
@@ -4799,6 +4872,7 @@ PrintTimeData(void)
 			"parse                 %lums\n",
 			TimeData.ParseEnd - TimeData.ParseBegin
 		);
+		End = TimeData.ParseEnd;
 	}
 	
 	if (TimeData.ExtractImportsEnd)
@@ -4808,6 +4882,7 @@ PrintTimeData(void)
 			"extract imports       %lums\n",
 			TimeData.ExtractImportsEnd - TimeData.ExtractImportsBegin
 		);
+		End = TimeData.ExtractImportsEnd;
 	}
 	
 	if (TimeData.BuildSymtabGlobalsEnd)
@@ -4817,6 +4892,7 @@ PrintTimeData(void)
 			"build symtab globals  %lums\n",
 			TimeData.BuildSymtabGlobalsEnd - TimeData.BuildSymtabGlobalsBegin
 		);
+		End = TimeData.BuildSymtabGlobalsEnd;
 	}
 	
 	if (TimeData.CheckAcyclicityEnd)
@@ -4826,7 +4902,11 @@ PrintTimeData(void)
 			"check acyclicity      %lums\n",
 			TimeData.CheckAcyclicityEnd - TimeData.CheckAcyclicityBegin
 		);
+		End = TimeData.CheckAcyclicityEnd;
 	}
+	
+	if (End)
+		fprintf(stderr, "total                 %lums\n", End - Begin);
 }
 
 static char *
