@@ -21,13 +21,10 @@
 ; * Base[]		C style array
 ; * ()		function pointer
 ; * Mut		mutability modifier
+; * ?             nullable
 ;
 ; you can also use these "pseudotypes" (take the position of a type but
 ; technically are not actually one):
 ;
 ; * Self		local pointer / instance of calling object
 ; * Null		somewhat equivalent to `void` in C
-
-; convenient type aliases can be created like this:
-TypeAlias PtrToMutUint8VarProc := Uint8 Mut(Uint8, Uint8 Mut, ...)
-TypeAlias ProcPtr := Null()

@@ -15,6 +15,7 @@
 ; @			get nth element   ;
 ; ^			address-of        ;
 ; .			element access    ;
+; ::			type access		;
 ; As			type cast         ;
 ; .^			dereference       ;
 ; [RTL]--------------------------13 ;

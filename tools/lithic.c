@@ -74,7 +74,6 @@ enum TokenType
 	TT_KW_STRUCT,
 	TT_KW_SWITCH,
 	TT_KW_TRUE,
-	TT_KW_TYPEALIAS,
 	TT_KW_UINT8,
 	TT_KW_UINT16,
 	TT_KW_UINT32,
@@ -97,6 +96,7 @@ enum TokenType
 	TT_CARET,
 	TT_TRIPLE_PERIOD,
 	TT_PERIOD,
+	TT_DOUBLE_COLON,
 	TT_PERIOD_CARET,
 	TT_MINUS,
 	TT_BANG,
@@ -158,6 +158,7 @@ enum AstNodeType
 	ANT_EXPR_NTH,
 	ANT_EXPR_ADDR_OF,
 	ANT_EXPR_ACCESS,
+	ANT_EXPR_TYPE_ACCESS,
 	ANT_EXPR_CAST,
 	ANT_EXPR_DEREF,
 	ANT_EXPR_PRE_INC,
@@ -226,8 +227,7 @@ enum AstNodeType
 	ANT_ENUM,
 	ANT_UNION,
 	ANT_MEMBER,
-	ANT_ENUM_MEMBER,
-	ANT_TYPE_ALIAS
+	ANT_ENUM_MEMBER
 };
 
 enum AstNodeFlag
@@ -236,7 +236,8 @@ enum AstNodeFlag
 	ANF_EXTERN = 0x2,
 	ANF_MUT = 0x4,
 	ANF_BASE = 0x8,
-	ANF_VARIADIC = 0x10
+	ANF_VARIADIC = 0x10,
+	ANF_NULLABLE = 0x20
 };
 
 enum ConfFlag
@@ -245,6 +246,15 @@ enum ConfFlag
 	CF_DUMP_AST = 0x2,
 	CF_TIME = 0x4,
 	CF_NO_FLOAT = 0x8
+};
+
+enum SymtabEntryType
+{
+	SET_STRUCT = 0,
+	SET_ENUM,
+	SET_UNION,
+	SET_VAR,
+	SET_PROC
 };
 
 struct Conf
@@ -347,13 +357,15 @@ struct TimeData
 	uint64_t LexBegin, LexEnd;
 	uint64_t ParseBegin, ParseEnd;
 	uint64_t ExtractImportsBegin, ExtractImportsEnd;
+	uint64_t BuildSymtabGlobalsBegin, BuildSymtabGlobalsEnd;
 	uint64_t CheckAcyclicityBegin, CheckAcyclicityEnd;
 };
 
 struct DepNode
 {
 	char *Name;
-	struct AstNode const *Declaration;
+	struct AstNode const *DeclNode;
+	struct FileData const *DeclFile;
 };
 
 struct DepGraph
@@ -364,10 +376,28 @@ struct DepGraph
 	size_t AdjacencySize;
 };
 
+struct SymtabEntry
+{
+	char *Name, *SuperName; // `SuperName` only relevant for methods.
+	struct AstNode const *DeclNode;
+	struct FileData const *DeclFile;
+	unsigned char Type;
+};
+
+struct Symtab
+{
+	struct SymtabEntry *Types;
+	size_t TypeCnt;
+	
+	struct SymtabEntry *Values;
+	size_t ValueCnt;
+};
+
 static void AstNode_AddChild(struct AstNode *Node, struct AstNode const *Child);
 static void AstNode_AddToken(struct AstNode *Node, struct Token const *Tok);
 static void AstNode_Destroy(struct AstNode *Node);
 static void AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth);
+static int BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules);
 static int CheckAcyclicity(struct ModuleDataGroup const *Modules);
 static int Conf_Read(int Argc, char const *Argv[]);
 static void Conf_Quit(void);
@@ -398,9 +428,10 @@ static int LexString(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexNum(struct FileData const *Data, struct Token *Out, size_t *i);
 static int LexWord(struct FileData const *Data, struct Token *Out, size_t *i);
 static size_t LineNumber(char const *Str, size_t Pos);
+static void LogAstNodeContext(struct FileData const *Data, struct AstNode const *Node, char const *Fmt, ...);
 static void LogAstNodeErr(struct FileData const *Data, struct AstNode const *Node, char const *Fmt, ...);
 static void LogErr(char const *Fmt, ...);
-static void LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...);
+static void LogProgErr(struct FileData const *Data, size_t Pos, size_t Len, char const *Fmt, ...);
 static void LogProgPosition(struct FileData const *Data, size_t Pos, size_t Len, char const *HlStyle);
 static void LogTokErr(struct FileData const *Data, struct Token const *Tok, char const *Fmt, ...);
 static void ModuleData_Destroy(struct ModuleData *Data);
@@ -431,7 +462,6 @@ static int ParseStatementList(struct AstNode *Out, struct ParseState *Ps, unsign
 static int ParseStruct(struct AstNode *Out, struct ParseState *Ps);
 static int ParseSwitch(struct AstNode *Out, struct ParseState *Ps);
 static int ParseType(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
-static int ParseTypeAlias(struct AstNode *Out, struct ParseState *Ps);
 static int ParseTypeLiteral(struct AstNode *Out, struct ParseState *Ps);
 static int ParseUnion(struct AstNode *Out, struct ParseState *Ps);
 static int ParseVar(struct AstNode *Out, struct ParseState *Ps, unsigned char const Term[], size_t TermCnt);
@@ -446,6 +476,12 @@ static unsigned SizeModBits(enum SizeMod Mod);
 static void SkipParseNewlines(struct ParseState *Ps);
 static int StrNumCmp(char const *a, size_t LenA, char const *b, size_t LenB);
 static char *Substr(char const *Str, size_t Lb, size_t Ub);
+static void Symtab_AddType(struct Symtab *Symtab, struct SymtabEntry const *Ent);
+static void Symtab_AddValue(struct Symtab *Symtab, struct SymtabEntry const *Ent);
+static void Symtab_Destroy(struct Symtab *Symtab);
+static int Symtab_RegisterAstNode(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static struct SymtabEntry const *Symtab_SearchTypes(struct Symtab const *Symtab, char const *Name);
+static struct SymtabEntry const *Symtab_SearchValues(struct Symtab const *Symtab, char const *Name, char const *SuperName);
 static void Token_Destroy(struct Token *Tok);
 static void Token_Print(FILE *Fp, struct Token const *Tok, size_t Ind);
 static enum AstNodeType TokenTypeToLed(enum TokenType Type);
@@ -541,7 +577,6 @@ static char const *Keywords[] =
 	"Struct",
 	"Switch",
 	"True",
-	"TypeAlias",
 	"Uint8",
 	"Uint16",
 	"Uint32",
@@ -600,7 +635,6 @@ static char const *TokenTypeNames[] =
 	"TT_KW_STRUCT",
 	"TT_KW_SWITCH",
 	"TT_KW_TRUE",
-	"TT_KW_TYPEALIAS",
 	"TT_KW_UINT8",
 	"TT_KW_UINT16",
 	"TT_KW_UINT32",
@@ -622,6 +656,7 @@ static char const *TokenTypeNames[] =
 	"TT_CARET",
 	"TT_TRIPLE_PERIOD",
 	"TT_PERIOD",
+	"TT_DOUBLE_COLON",
 	"TT_PERIOD_CARET",
 	"TT_MINUS",
 	"TT_BANG",
@@ -683,6 +718,7 @@ static char const *NodeTypeNames[] =
 	"ANT_EXPR_NTH",
 	"ANT_EXPR_ADDR_OF",
 	"ANT_EXPR_ACCESS",
+	"ANT_EXPR_TYPE_ACCESS",
 	"ANT_EXPR_CAST",
 	"ANT_EXPR_DEREF",
 	"ANT_EXPR_PRE_INC",
@@ -751,8 +787,7 @@ static char const *NodeTypeNames[] =
 	"ANT_ENUM",
 	"ANT_UNION",
 	"ANT_MEMBER",
-	"ANT_ENUM_MEMBER",
-	"ANT_TYPE_ALIAS"
+	"ANT_ENUM_MEMBER"
 };
 
 static struct BindPower ExprBindPower[] =
@@ -777,6 +812,7 @@ static struct BindPower ExprBindPower[] =
 	{27, 28}, // @
 	{27, 28}, // ^
 	{27, 28}, // .
+	{27, 28}, // ::
 	{27, 28}, // As
 	{27, 28}, // .^
 	
@@ -932,7 +968,19 @@ main(int Argc, char const *Argv[])
 			ModuleDataGroup_Destroy(&ModuleDataGroup);
 			return 1;
 		}
-		TimeData.ExtractImportsBegin = GetUnixTimeMs();
+		TimeData.ExtractImportsEnd = GetUnixTimeMs();
+	}
+	
+	// build symtab globals.
+	struct Symtab Symtab = {0};
+	{
+		TimeData.BuildSymtabGlobalsBegin = GetUnixTimeMs();
+		if (BuildSymtabGlobals(&Symtab, &ModuleDataGroup))
+		{
+			ModuleDataGroup_Destroy(&ModuleDataGroup);
+			return 1;
+		}
+		TimeData.BuildSymtabGlobalsEnd = GetUnixTimeMs();
 	}
 	
 	// check acyclicity of language elements where necessary.
@@ -940,6 +988,7 @@ main(int Argc, char const *Argv[])
 		TimeData.CheckAcyclicityBegin = GetUnixTimeMs();
 		if (CheckAcyclicity(&ModuleDataGroup))
 		{
+			Symtab_Destroy(&Symtab);
 			ModuleDataGroup_Destroy(&ModuleDataGroup);
 			return 1;
 		}
@@ -948,6 +997,7 @@ main(int Argc, char const *Argv[])
 	
 	// TODO: implement rest of transpilation process.
 	
+	Symtab_Destroy(&Symtab);
 	ModuleDataGroup_Destroy(&ModuleDataGroup);
 	return 0;
 }
@@ -1002,13 +1052,14 @@ AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth)
 		
 		fprintf(
 			Fp,
-			"%s (%c%c%c%c%c)\n",
+			"%s (%c%c%c%c%c%c)\n",
 			NodeTypeNames[Node->Type],
 			Node->Flags & ANF_PUBLIC ? 'P' : '-',
 			Node->Flags & ANF_EXTERN ? 'E' : '-',
 			Node->Flags & ANF_MUT ? 'M' : '-',
 			Node->Flags & ANF_BASE ? 'B' : '-',
-			Node->Flags & ANF_VARIADIC ? 'V' : '-'
+			Node->Flags & ANF_VARIADIC ? 'V' : '-',
+			Node->Flags & ANF_NULLABLE ? 'N' : '-'
 		);
 		
 		for (size_t i = 0; i < Node->TokCnt; ++i)
@@ -1027,9 +1078,67 @@ AstNode_Print(FILE *Fp, struct AstNode const *Node, unsigned Depth)
 }
 
 static int
+BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules)
+{
+	struct Symtab Symtab = {0};
+	
+	// register symbols from main module.
+	{
+		struct AstNode const *Ast = &Modules->Modules[0].Ast;
+		struct FileData const *File = &Modules->Modules[0].File;
+		for (size_t i = 0; i < Ast->ChildCnt; ++i)
+		{
+			if (Symtab_RegisterAstNode(&Symtab, File, &Ast->Children[i]))
+			{
+				Symtab_Destroy(&Symtab);
+				return 1;
+			}
+		}
+	}
+	
+	// register symbols from imported modules.
+	{
+		for (size_t i = 1; i < Modules->ModuleCnt; ++i)
+		{
+			struct AstNode const *Ast = &Modules->Modules[i].Ast;
+			struct FileData const *File = &Modules->Modules[i].File;
+			for (size_t j = 0; j < Ast->ChildCnt; ++j)
+			{
+				if (Symtab_RegisterAstNode(&Symtab, File, &Ast->Children[j]))
+				{
+					Symtab_Destroy(&Symtab);
+					return 1;
+				}
+			}
+		}
+	}
+	
+	*Out = Symtab;
+	return 0;
+}
+
+static int
 CheckAcyclicity(struct ModuleDataGroup const *Modules)
 {
-	// TODO: implement acyclicity check for types.
+	// register nodes from main module.
+	{
+	}
+	
+	// registers nodes from imported modules.
+	{
+	}
+	
+	// register edges from main module.
+	{
+	}
+	
+	// register edges from imported modules.
+	{
+	}
+	
+	// TODO: finish implementing acyclicity check for types.
+	// TODO: check values as well as types for acyclicity.
+	
 	return 1;
 }
 
@@ -1409,7 +1518,7 @@ ExpectToken(struct ParseState *Ps, enum TokenType Type)
 	struct Token const *Tok = NextToken(Ps);
 	if (!Tok)
 	{
-		LogProgErr(Ps->File, Ps->File->Len, "expected %s at end of file, found nothing!", TokenTypeNames[Type]);
+		LogProgErr(Ps->File, Ps->File->Len, 1, "expected %s at end of file, found nothing!", TokenTypeNames[Type]);
 		return NULL;
 	}
 	
@@ -1607,7 +1716,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 			{
 				if (NoNewline)
 				{
-					LogProgErr(Data, i, "newline cancels cannot be followed by code!");
+					LogProgErr(Data, i, 1, "newline cancels cannot be followed by code!");
 					LexData_Destroy(Out);
 					return 1;
 				}
@@ -1862,7 +1971,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				}
 				else
 				{
-					LogProgErr(Data, i, "expected double '==', found single '='!");
+					LogProgErr(Data, i, 1, "expected double '==', found single '='!");
 					LexData_Destroy(Out);
 					return 1;
 				}
@@ -1876,6 +1985,11 @@ Lex(struct LexData *Out, struct FileData const *Data)
 					LexData_AddSpecialChar(Out, i, 2, TT_COLON_EQUAL);
 					++i;
 				}
+				else if (i + 1 < Data->Len && !strncmp(&Data->Data[i], "::", 2))
+				{
+					LexData_AddSpecialChar(Out, i, 2, TT_DOUBLE_COLON);
+					++i;
+				}
 				else
 					LexData_AddSpecialChar(Out, i, 1, TT_COLON);
 				break;
@@ -1883,7 +1997,7 @@ Lex(struct LexData *Out, struct FileData const *Data)
 				LexData_AddSpecialChar(Out, i, 1, TT_COMMA);
 				break;
 			default:
-				LogProgErr(Data, i, "unhandled character - '%c'!", Data->Data[i]);
+				LogProgErr(Data, i, 1, "unhandled character - '%c'!", Data->Data[i]);
 				LexData_Destroy(Out);
 				return 1;
 			}
@@ -1907,7 +2021,7 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 		++*i;
 		if (Data->Data[*i] == '\'')
 		{
-			LogProgErr(Data, Lb, "cannot have empty character literals!");
+			LogProgErr(Data, Lb, 1, "cannot have empty character literals!");
 			free(ChData);
 			return 1;
 		}
@@ -1915,7 +2029,7 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 		{
 			if (ConvEscSequence(Data->Data, Data->Len, i, &ChData, &ChDataLen))
 			{
-				LogProgErr(Data, Lb, "invalid escape in character - '%c'!", Data->Data[*i + 1]);
+				LogProgErr(Data, Lb, 1, "invalid escape in character - '%c'!", Data->Data[*i + 1]);
 				free(ChData);
 				return 1;
 			}
@@ -1925,7 +2039,7 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 		
 		if (Data->Data[*i] != '\'')
 		{
-			LogProgErr(Data, Lb, "cannot have unterminated character literals!");
+			LogProgErr(Data, Lb, 1, "cannot have unterminated character literals!");
 			free(ChData);
 			return 1;
 		}
@@ -1950,7 +2064,7 @@ LexChar(struct FileData const *Data, struct Token *Out, size_t *i)
 			SizeMod = SM_8;
 		else
 		{
-			LogProgErr(Data, Lb, "character literal has invalid size modifier!");
+			LogProgErr(Data, Lb, 1, "character literal has invalid size modifier!");
 			free(ChData);
 			return 1;
 		}
@@ -2023,7 +2137,7 @@ LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 		{
 			if (ConvEscSequence(Data->Data, Data->Len, i, &StrData, &StrDataLen))
 			{
-				LogProgErr(Data, Lb, "invalid escape in string - '%c'!", Data->Data[*i + 1]);
+				LogProgErr(Data, Lb, 1, "invalid escape in string - '%c'!", Data->Data[*i + 1]);
 				free(StrData);
 				return 1;
 			}
@@ -2051,7 +2165,7 @@ LexString(struct FileData const *Data, struct Token *Out, size_t *i)
 			SizeMod = SM_8;
 		else
 		{
-			LogProgErr(Data, Lb, "string literal has invalid size modifier!");
+			LogProgErr(Data, Lb, 1, "string literal has invalid size modifier!");
 			free(StrData);
 			return 1;
 		}
@@ -2114,7 +2228,7 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 		
 		if (isalnum(Data->Data[*i]))
 		{
-			LogProgErr(Data, Lb, "number literal contains invalid digit - '%c'!", Data->Data[*i]);
+			LogProgErr(Data, Lb, 1, "number literal contains invalid digit - '%c'!", Data->Data[*i]);
 			return 1;
 		}
 	}
@@ -2124,31 +2238,31 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 	{
 		if (DpCnt > 0 && NumBase != 10)
 		{
-			LogProgErr(Data, Lb, "floating-point literals must be decimal!");
+			LogProgErr(Data, Lb, 1, "floating-point literals must be decimal!");
 			return 1;
 		}
 		
 		if (DpCnt > 0 && DigitsBeforeDp == 0)
 		{
-			LogProgErr(Data, Lb, "expected a digit prior to the decimal point!");
+			LogProgErr(Data, Lb, 1, "expected a digit prior to the decimal point!");
 			return 1;
 		}
 		
 		if (DpCnt > 0 && DigitsAfterDp == 0)
 		{
-			LogProgErr(Data, Lb, "expected a digit after the decimal point!");
+			LogProgErr(Data, Lb, 1, "expected a digit after the decimal point!");
 			return 1;
 		}
 		
 		if (DpCnt > 1)
 		{
-			LogProgErr(Data, Lb, "floating-point literals cannot have more than one decimal point!");
+			LogProgErr(Data, Lb, 1, "floating-point literals cannot have more than one decimal point!");
 			return 1;
 		}
 		
 		if (NumBase != 10 && NumUb == Lb + 2)
 		{
-			LogProgErr(Data, Lb, "expected value after base prefix!");
+			LogProgErr(Data, Lb, 1, "expected value after base prefix!");
 			return 1;
 		}
 	}
@@ -2175,13 +2289,13 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 			SizeMod = SM_SIZE;
 		else
 		{
-			LogProgErr(Data, Lb, "number literal has invalid size modifier!");
+			LogProgErr(Data, Lb, 1, "number literal has invalid size modifier!");
 			return 1;
 		}
 		
 		if (DpCnt > 0 && SizeMod != SM_32 && SizeMod != SM_64)
 		{
-			LogProgErr(Data, Lb, "invalid size modifier on float literal, only 32 and 64 supported!");
+			LogProgErr(Data, Lb, 1, "invalid size modifier on float literal, only 32 and 64 supported!");
 			return 1;
 		}
 	}
@@ -2206,7 +2320,7 @@ LexNum(struct FileData const *Data, struct Token *Out, size_t *i)
 		
 		if (Invalid)
 		{
-			LogProgErr(Data, Lb, "integer literal cannot fit in %d bits!", SizeModBits(SizeMod));
+			LogProgErr(Data, Lb, 1, "integer literal cannot fit in %d bits!", SizeModBits(SizeMod));
 			return 1;
 		}
 	}
@@ -2243,7 +2357,7 @@ LexWord(struct FileData const *Data, struct Token *Out, size_t *i)
 	{
 		if (IsRaw && !isalnum(Data->Data[*i]) && Data->Data[*i] != '_')
 		{
-			LogProgErr(Data, *i, "expected an identifier after @!");
+			LogProgErr(Data, *i, 1, "expected an identifier after @!");
 			return 1;
 		}
 		
@@ -2315,6 +2429,36 @@ LineNumber(char const *Str, size_t Pos)
 }
 
 static void
+LogAstNodeContext(
+	struct FileData const *Data,
+	struct AstNode const *Node,
+	char const *Fmt,
+	...
+)
+{
+	// write out context message.
+	{
+		va_list Args;
+		va_start(Args, Fmt);
+		
+		fprintf(stderr, "%s \x1b[1;36mcontext\x1b[0m: ", Data->Name);
+		vfprintf(stderr, Fmt, Args);
+		fprintf(stderr, "\n");
+		
+		va_end(Args);
+	}
+	
+	struct Token const *FirstTok = Node->Toks[0];
+	struct Token const *LastTok = Node->Toks[Node->TokCnt - 1];
+	LogProgPosition(
+		Data,
+		FirstTok->Pos,
+		LastTok->Pos + LastTok->Len - FirstTok->Pos,
+		"1;36"
+	);
+}
+
+static void
 LogAstNodeErr(
 	struct FileData const *Data,
 	struct AstNode const *Node,
@@ -2327,7 +2471,7 @@ LogAstNodeErr(
 		va_list Args;
 		va_start(Args, Fmt);
 		
-		fprintf(stderr, "%s \x1b[31merr\x1b[0m: ", Data->Name);
+		fprintf(stderr, "%s \x1b[1;31merr\x1b[0m: ", Data->Name);
 		vfprintf(stderr, Fmt, Args);
 		fprintf(stderr, "\n");
 		
@@ -2335,7 +2479,13 @@ LogAstNodeErr(
 	}
 	
 	struct Token const *FirstTok = Node->Toks[0];
-	LogProgPosition(Data, FirstTok->Pos, FirstTok->Len, "31");
+	struct Token const *LastTok = Node->Toks[Node->TokCnt - 1];
+	LogProgPosition(
+		Data,
+		FirstTok->Pos,
+		LastTok->Pos + LastTok->Len - FirstTok->Pos,
+		"1;31"
+	);
 }
 
 static void
@@ -2344,7 +2494,7 @@ LogErr(char const *Fmt, ...)
 	va_list Args;
 	va_start(Args, Fmt);
 	
-	fprintf(stderr, "\x1b[31merr\x1b[0m: ");
+	fprintf(stderr, "\x1b[1;31merr\x1b[0m: ");
 	vfprintf(stderr, Fmt, Args);
 	fprintf(stderr, "\n");
 	
@@ -2352,21 +2502,27 @@ LogErr(char const *Fmt, ...)
 }
 
 static void
-LogProgErr(struct FileData const *Data, size_t i, char const *Fmt, ...)
+LogProgErr(
+	struct FileData const *Data,
+	size_t Pos,
+	size_t Len,
+	char const *Fmt,
+	...
+)
 {
 	// write out error message.
 	{
 		va_list Args;
 		va_start(Args, Fmt);
 		
-		fprintf(stderr, "%s \x1b[31merr\x1b[0m: ", Data->Name);
+		fprintf(stderr, "%s \x1b[1;31merr\x1b[0m: ", Data->Name);
 		vfprintf(stderr, Fmt, Args);
 		fprintf(stderr, "\n");
 		
 		va_end(Args);
 	}
 	
-	LogProgPosition(Data, i, 1, "31");
+	LogProgPosition(Data, Pos, Len, "1;31");
 }
 
 static void
@@ -2390,7 +2546,7 @@ LogProgPosition(
 		fprintf(
 			stderr,
 			"\x1b[2m[line %zu (byte %zu)]\n"
-			"\\->\x1b[0m ",
+			"|\x1b[0m ",
 			LineNumber(Data->Data, Pos),
 			Pos
 		);
@@ -2404,7 +2560,7 @@ LogProgPosition(
 			);
 		}
 		
-		fprintf(stderr, "\n    ");
+		fprintf(stderr, "\n\x1b[2m|\x1b[0m ");
 	}
 	
 	// write out highlight indicator.
@@ -2432,14 +2588,14 @@ LogTokErr(
 		va_list Args;
 		va_start(Args, Fmt);
 		
-		fprintf(stderr, "%s \x1b[31merr\x1b[0m: ", Data->Name);
+		fprintf(stderr, "%s \x1b[1;31merr\x1b[0m: ", Data->Name);
 		vfprintf(stderr, Fmt, Args);
 		fprintf(stderr, "\n");
 		
 		va_end(Args);
 	}
 	
-	LogProgPosition(Data, Tok->Pos, Tok->Len, "31");
+	LogProgPosition(Data, Tok->Pos, Tok->Len, "1;31");
 }
 
 static void
@@ -3171,6 +3327,7 @@ ParseExprLed(
 	}
 	case ANT_EXPR_NTH:
 	case ANT_EXPR_ACCESS:
+	case ANT_EXPR_TYPE_ACCESS:
 	case ANT_EXPR_MUL:
 	case ANT_EXPR_DIV:
 	case ANT_EXPR_MOD:
@@ -3627,7 +3784,7 @@ ParseProc(struct AstNode *Out, struct ParseState *Ps)
 		struct Token const *NameRhs = NULL;
 		
 		struct Token const *Next = PeekToken(Ps);
-		if (Next && Next->Type == TT_PERIOD)
+		if (Next && Next->Type == TT_DOUBLE_COLON)
 		{
 			++Ps->i;
 			
@@ -3754,17 +3911,6 @@ ParseProgram(struct AstNode *Out, struct ParseState *Ps)
 		{
 			struct AstNode Child = {0};
 			if (ParseUnion(&Child, Ps))
-			{
-				AstNode_Destroy(Out);
-				return 1;
-			}
-			AstNode_AddChild(Out, &Child);
-			break;
-		}
-		case TT_KW_TYPEALIAS:
-		{
-			struct AstNode Child = {0};
-			if (ParseTypeAlias(&Child, Ps))
 			{
 				AstNode_Destroy(Out);
 				return 1;
@@ -4287,6 +4433,21 @@ ParseType(
 			}
 			Lhs.Flags |= ANF_MUT;
 			break;
+		case TT_QUESTION:
+			if (Lhs.Flags & ANF_NULLABLE)
+			{
+				LogTokErr(Ps->File, Mod, "nullability modifier cannot be applied on a type multiple times!");
+				AstNode_Destroy(&Lhs);
+				return 1;
+			}
+			if (Lhs.Type != ANT_TYPE_PTR && Lhs.Type != ANT_TYPE_PROC)
+			{
+				LogTokErr(Ps->File, Mod, "only pointers and function pointers can be made nullable!");
+				AstNode_Destroy(&Lhs);
+				return 1;
+			}
+			Lhs.Flags |= ANF_NULLABLE;
+			break;
 		default:
 			LogTokErr(Ps->File, Mod, "expected type modifier or terminator!");
 			AstNode_Destroy(&Lhs);
@@ -4295,38 +4456,6 @@ ParseType(
 	}
 Done:
 	*Out = Lhs;
-	
-	return 0;
-}
-
-static int
-ParseTypeAlias(struct AstNode *Out, struct ParseState *Ps)
-{
-	if (!ExpectToken(Ps, TT_KW_TYPEALIAS))
-		return 1;
-	
-	struct Token const *Vis = PeekToken(Ps);
-	if (Vis && Vis->Type == TT_ASTERISK)
-	{
-		Out->Flags |= ANF_PUBLIC;
-		++Ps->i;
-	}
-	
-	struct Token const *Name = ExpectToken(Ps, TT_IDENT);
-	if (!Name)
-		return 1;
-	
-	if (!ExpectToken(Ps, TT_COLON_EQUAL))
-		return 1;
-	
-	struct AstNode Child = {0};
-	unsigned char Term[] = {TT_NEWLINE};
-	if (ParseWrappedType(&Child, Ps, Term, 1))
-		return 1;
-	
-	Out->Type = ANT_TYPE_ALIAS;
-	AstNode_AddToken(Out, Name);
-	AstNode_AddChild(Out, &Child);
 	
 	return 0;
 }
@@ -4640,7 +4769,7 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"conf read: %lums\n",
+			"conf read             %lums\n",
 			TimeData.ConfReadEnd - TimeData.ConfReadBegin
 		);
 	}
@@ -4649,7 +4778,7 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"file read: %lums\n",
+			"file read             %lums\n",
 			TimeData.FileReadEnd - TimeData.FileReadBegin
 		);
 	}
@@ -4658,7 +4787,7 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"lex: %lums\n",
+			"lex                   %lums\n",
 			TimeData.LexEnd - TimeData.LexBegin
 		);
 	}
@@ -4667,7 +4796,7 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"parse: %lums\n",
+			"parse                 %lums\n",
 			TimeData.ParseEnd - TimeData.ParseBegin
 		);
 	}
@@ -4676,8 +4805,17 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"extract imports: %lums\n",
+			"extract imports       %lums\n",
 			TimeData.ExtractImportsEnd - TimeData.ExtractImportsBegin
+		);
+	}
+	
+	if (TimeData.BuildSymtabGlobalsEnd)
+	{
+		fprintf(
+			stderr,
+			"build symtab globals  %lums\n",
+			TimeData.BuildSymtabGlobalsEnd - TimeData.BuildSymtabGlobalsBegin
 		);
 	}
 	
@@ -4685,7 +4823,7 @@ PrintTimeData(void)
 	{
 		fprintf(
 			stderr,
-			"check acyclicity: %lums\n",
+			"check acyclicity      %lums\n",
 			TimeData.CheckAcyclicityEnd - TimeData.CheckAcyclicityBegin
 		);
 	}
@@ -4798,6 +4936,244 @@ Substr(char const *Str, size_t Lb, size_t Ub)
 }
 
 static void
+Symtab_AddType(struct Symtab *Symtab, struct SymtabEntry const *Ent)
+{
+	++Symtab->TypeCnt;
+	Symtab->Types = reallocarray(
+		Symtab->Types,
+		Symtab->TypeCnt,
+		sizeof(struct SymtabEntry)
+	);
+	Symtab->Types[Symtab->TypeCnt - 1] = *Ent;
+}
+
+static void
+Symtab_AddValue(struct Symtab *Symtab, struct SymtabEntry const *Ent)
+{
+	++Symtab->ValueCnt;
+	Symtab->Values = reallocarray(
+		Symtab->Values,
+		Symtab->ValueCnt,
+		sizeof(struct SymtabEntry)
+	);
+	Symtab->Values[Symtab->ValueCnt - 1] = *Ent;
+}
+
+static void
+Symtab_Destroy(struct Symtab *Symtab)
+{
+	// release entry resources.
+	{
+		for (size_t i = 0; i < Symtab->TypeCnt; ++i)
+			free(Symtab->Types[i].Name);
+		for (size_t i = 0; i < Symtab->ValueCnt; ++i)
+		{
+			free(Symtab->Values[i].Name);
+			if (Symtab->Values[i].SuperName)
+				free(Symtab->Values[i].SuperName);
+		}
+	}
+	
+	// release symtab resources.
+	{
+		if (Symtab->Types)
+			free(Symtab->Types);
+		if (Symtab->Values)
+			free(Symtab->Values);
+	}
+}
+
+static int
+Symtab_RegisterAstNode(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	// check for redefinition.
+	{
+		switch (Node->Type)
+		{
+		case ANT_PROC:
+		{
+			struct SymtabEntry const *Ent;
+			if (Node->TokCnt == 2)
+			{
+				Ent = Symtab_SearchValues(
+					Symtab,
+					Node->Toks[1]->Data.Str.Text,
+					Node->Toks[0]->Data.Str.Text
+				);
+			}
+			else
+			{
+				Ent = Symtab_SearchValues(
+					Symtab,
+					Node->Toks[0]->Data.Str.Text,
+					NULL
+				);
+			}
+			
+			if (Ent)
+			{
+				LogAstNodeErr(File, Node, "redefinition of symbol!");
+				LogAstNodeContext(Ent->DeclFile, Ent->DeclNode, "previously defined here:");
+				return 1;
+			}
+			
+			break;
+		}
+		case ANT_VAR:
+		{
+			char const *Sym = Node->Toks[0]->Data.Str.Text;
+			struct SymtabEntry const *Ent = Symtab_SearchValues(Symtab, Sym, NULL);
+			if (Ent)
+			{
+				LogAstNodeErr(File, Node, "redefinition of symbol!");
+				LogAstNodeContext(Ent->DeclFile, Ent->DeclNode, "previously defined here:");
+				return 1;
+			}
+			break;
+		}
+		case ANT_STRUCT:
+		case ANT_ENUM:
+		case ANT_UNION:
+		{
+			char const *Sym = Node->Toks[0]->Data.Str.Text;
+			struct SymtabEntry const *Ent = Symtab_SearchTypes(Symtab, Sym);
+			if (Ent)
+			{
+				LogAstNodeErr(File, Node, "redefinition of symbol!");
+				LogAstNodeContext(Ent->DeclFile, Ent->DeclNode, "previously defined here:");
+				return 1;
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	
+	// register AST node as symtab entry.
+	{
+		switch (Node->Type)
+		{
+		case ANT_PROC:
+		{
+			struct SymtabEntry Ent =
+			{
+				.DeclNode = Node,
+				.DeclFile = File,
+				.Type = SET_PROC
+			};
+			
+			if (Node->TokCnt == 2)
+			{
+				Ent.Name = strdup(Node->Toks[1]->Data.Str.Text);
+				Ent.SuperName = strdup(Node->Toks[0]->Data.Str.Text);
+			}
+			else
+				Ent.Name = strdup(Node->Toks[0]->Data.Str.Text);
+			
+			Symtab_AddValue(Symtab, &Ent);
+			
+			break;
+		}
+		case ANT_VAR:
+		{
+			struct SymtabEntry Ent =
+			{
+				.Name = strdup(Node->Toks[0]->Data.Str.Text),
+				.DeclNode = Node,
+				.DeclFile = File,
+				.Type = SET_VAR
+			};
+			Symtab_AddValue(Symtab, &Ent);
+			break;
+		}
+		case ANT_STRUCT:
+		{
+			struct SymtabEntry Ent =
+			{
+				.Name = strdup(Node->Toks[0]->Data.Str.Text),
+				.DeclNode = Node,
+				.DeclFile = File,
+				.Type = SET_STRUCT
+			};
+			Symtab_AddType(Symtab, &Ent);
+			break;
+		}
+		case ANT_ENUM:
+		{
+			struct SymtabEntry Ent =
+			{
+				.Name = strdup(Node->Toks[0]->Data.Str.Text),
+				.DeclNode = Node,
+				.DeclFile = File,
+				.Type = SET_ENUM
+			};
+			Symtab_AddType(Symtab, &Ent);
+			break;
+		}
+		case ANT_UNION:
+		{
+			struct SymtabEntry Ent =
+			{
+				.Name = strdup(Node->Toks[0]->Data.Str.Text),
+				.DeclNode = Node,
+				.DeclFile = File,
+				.Type = SET_UNION
+			};
+			Symtab_AddType(Symtab, &Ent);
+			break;
+		}
+		default:
+			break;
+		}
+	}
+	
+	return 0;
+}
+
+static struct SymtabEntry const *
+Symtab_SearchTypes(struct Symtab const *Symtab, char const *Name)
+{
+	for (size_t i = 0; i < Symtab->TypeCnt; ++i)
+	{
+		if (!strcmp(Name, Symtab->Types[i].Name))
+			return &Symtab->Types[i];
+	}
+	return NULL;
+}
+
+static struct SymtabEntry const *
+Symtab_SearchValues(
+	struct Symtab const *Symtab,
+	char const *Name,
+	char const *SuperName
+)
+{
+	for (size_t i = 0; i < Symtab->ValueCnt; ++i)
+	{
+		if (!SuperName
+			&& !Symtab->Values[i].SuperName
+			&& !strcmp(Name, Symtab->Values[i].Name))
+		{
+			return &Symtab->Values[i];
+		}
+		else if (SuperName
+			&& Symtab->Values[i].SuperName
+			&& !strcmp(Name, Symtab->Values[i].Name)
+			&& !strcmp(SuperName, Symtab->Values[i].SuperName))
+		{
+			return &Symtab->Values[i];
+		}
+	}
+	
+	return NULL;
+}
+
+static void
 Token_Destroy(struct Token *Tok)
 {
 	switch (Tok->Type)
@@ -4855,6 +5231,8 @@ TokenTypeToLed(enum TokenType Type)
 		return ANT_EXPR_ADDR_OF;
 	case TT_PERIOD:
 		return ANT_EXPR_ACCESS;
+	case TT_DOUBLE_COLON:
+		return ANT_EXPR_TYPE_ACCESS;
 	case TT_KW_AS:
 		return ANT_EXPR_CAST;
 	case TT_PERIOD_CARET:

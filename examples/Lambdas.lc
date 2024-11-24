@@ -24,7 +24,12 @@ Proc PrintAll(Buf Uint8^, Size Usize, Cnt Usize, PrintItem Null(Uint8^)) Null
 	; ...
 End
 
-Proc SortAll(Buf Uint8 Mut^, Size Usize, Cnt Usize, Cmp Int32(Uint8^, Uint8^)) Null
+Proc SortAll( \
+	Buf Uint8 Mut^, \
+	Size Usize, \
+	Cnt Usize, \
+	Cmp Int32(Uint8^, Uint8^) \
+) Null
 	; ...
 End
 
