@@ -38,6 +38,17 @@ Proc MulAdd(Mul Int32, ...) Int32
 	Return Sum
 End
 
+; you can also take length-enabled and C-style variadic argument lists as
+; arguments, allowing for better support with C code and such.
+Proc TakesLengthVargs(Args Vargs) Null
+	Var Len Usize := LenOf(Args)
+End
+
+Proc TakesCStyleVargs(Args Base Vargs) Null
+	; cannot take length of `Args`.
+	;Var Len Usize := LenOf(Args)
+End
+
 ; this function will have its variadic arguments passed in the same way as a C
 ; function, without a count, meaning you must have an argument prior to them and
 ; cannot use `VargCount` within the function.

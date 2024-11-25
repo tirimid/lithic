@@ -13,6 +13,7 @@
 ; * Bool		boolean true/false value
 ; * Float32		single precision floating point value
 ; * Float64		double precision floating point value
+; * Vargs		variadic arguments list
 ;
 ; and the following modifiers:
 ;

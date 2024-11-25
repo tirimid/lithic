@@ -82,7 +82,8 @@ enum TokenType
 	TT_KW_USIZE,
 	TT_KW_VAR,
 	TT_KW_VARGCOUNT,
-	TT_KW_LAST__ = TT_KW_VARGCOUNT,
+	TT_KW_VARGS,
+	TT_KW_LAST__ = TT_KW_VARGS,
 	
 	// special characters.
 	TT_NEWLINE,
@@ -359,6 +360,7 @@ struct TimeData
 	uint64_t ExtractImportsBegin, ExtractImportsEnd;
 	uint64_t BuildSymtabGlobalsBegin, BuildSymtabGlobalsEnd;
 	uint64_t CheckAcyclicityBegin, CheckAcyclicityEnd;
+	uint64_t AnalyzeBegin, AnalyzeEnd;
 };
 
 struct DepNode
@@ -393,6 +395,12 @@ struct Symtab
 	size_t ValueCnt;
 };
 
+static int Analyze(struct Symtab *Symtab, struct ModuleDataGroup const *Modules);
+static int AnalyzeCommonType(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static int AnalyzeConstExpr(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static int AnalyzeEnum(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static int AnalyzeGlobalVar(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static int AnalyzeProc(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
 static void AstNode_AddChild(struct AstNode *Node, struct AstNode const *Child);
 static void AstNode_AddToken(struct AstNode *Node, struct Token const *Tok);
 static void AstNode_Destroy(struct AstNode *Node);
@@ -585,7 +593,8 @@ static char const *Keywords[] =
 	"Union",
 	"Usize",
 	"Var",
-	"VargCount"
+	"VargCount",
+	"Vargs"
 };
 
 static char const *TokenTypeNames[] =
@@ -644,6 +653,7 @@ static char const *TokenTypeNames[] =
 	"TT_KW_USIZE",
 	"TT_KW_VAR",
 	"TT_KW_VARGCOUNT",
+	"TT_KW_VARGS",
 	
 	// special characters.
 	"TT_NEWLINE",
@@ -996,11 +1006,223 @@ main(int Argc, char const *Argv[])
 		TimeData.CheckAcyclicityEnd = GetUnixTimeMs();
 	}
 	
+	// analyze modules.
+	{
+		TimeData.AnalyzeBegin = GetUnixTimeMs();
+		if (Analyze(&Symtab, &ModuleDataGroup))
+		{
+			Symtab_Destroy(&Symtab);
+			ModuleDataGroup_Destroy(&ModuleDataGroup);
+			return 1;
+		}
+		TimeData.AnalyzeEnd = GetUnixTimeMs();
+	}
+	
 	// TODO: implement rest of transpilation process.
 	
 	Symtab_Destroy(&Symtab);
 	ModuleDataGroup_Destroy(&ModuleDataGroup);
 	return 0;
+}
+
+static int
+Analyze(struct Symtab *Symtab, struct ModuleDataGroup const *Modules)
+{
+	// analyze imported modules.
+	{
+		for (size_t i = 0; i < Modules->ModuleCnt; ++i)
+		{
+			struct ModuleData const *Mod = &Modules->Modules[i];
+			for (size_t j = 0; j < Mod->Ast.ChildCnt; ++j)
+			{
+				struct AstNode const *Child = &Mod->Ast.Children[j];
+				switch (Child->Type)
+				{
+				case ANT_PROC:
+					if (AnalyzeProc(Symtab, &Mod->File, Child))
+						return 1;
+					break;
+				case ANT_VAR:
+					if (AnalyzeGlobalVar(Symtab, &Mod->File, Child))
+						return 1;
+					break;
+				case ANT_ENUM:
+					if (AnalyzeEnum(Symtab, &Mod->File, Child))
+						return 1;
+					break;
+				default:
+					break;
+				}
+			}
+		}
+	}
+	
+	// analyze main module.
+	{
+		struct ModuleData const *Mod = &Modules->Modules[0];
+		for (size_t i = 0; i < Mod->Ast.ChildCnt; ++i)
+		{
+			struct AstNode const *Child = &Mod->Ast.Children[i];
+			switch (Child->Type)
+			{
+			case ANT_PROC:
+				if (AnalyzeProc(Symtab, &Mod->File, Child))
+					return 1;
+				break;
+			case ANT_VAR:
+				if (AnalyzeGlobalVar(Symtab, &Mod->File, Child))
+					return 1;
+				break;
+			case ANT_ENUM:
+				if (AnalyzeEnum(Symtab, &Mod->File, Child))
+					return 1;
+			default:
+				break;
+			}
+		}
+	}
+	
+	return 0;
+}
+
+static int
+AnalyzeCommonType(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	switch (Node->Type)
+	{
+	case ANT_TYPE:
+	case ANT_TYPE_PTR:
+	case ANT_TYPE_ARRAY:
+		return AnalyzeCommonType(Symtab, File, &Node->Children[0]);
+	case ANT_TYPE_ATOM:
+	{
+		struct Token const *Tok = Node->Toks[0];
+		switch (Tok->Type)
+		{
+		case TT_IDENT:
+		{
+			struct SymtabEntry const *Ent = Symtab_SearchTypes(Symtab, Tok->Data.Str.Text);
+			if (!Ent)
+			{
+				LogAstNodeErr(File, Node, "use of unrecognized type!");
+				return 1;
+			}
+			break;
+		}
+		case TT_KW_SELF:
+			LogAstNodeErr(File, Node, "Self cannot be used in common types!");
+			return 1;
+		case TT_KW_NULL:
+			LogAstNodeErr(File, Node, "Null can only be used for function return types!");
+			return 1;
+		case TT_TRIPLE_PERIOD:
+			LogAstNodeErr(File, Node, "... cannot be used in common types!");
+			return 1;
+		default:
+			break;
+		}
+		
+		return 0;
+	}
+	case ANT_TYPE_PROC:
+	{
+		struct AstNode const *RetType = &Node->Children[0];
+		if (RetType->Toks[0]->Type != TT_KW_NULL)
+		{
+			if (AnalyzeCommonType(Symtab, File, RetType))
+				return 1;
+		}
+		
+		for (size_t i = 1; i < Node->ChildCnt; ++i)
+		{
+			if (AnalyzeCommonType(Symtab, File, &Node->Children[i]))
+				return 1;
+		}
+		
+		return 0;
+	}
+	case ANT_TYPE_BUFFER:
+		// TODO: implement common buffer type semanal.
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static int
+AnalyzeConstExpr(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	// TODO: finish implementing const expr semanal.
+	
+	switch (Node->Type)
+	{
+	case ANT_EXPR:
+		return AnalyzeConstExpr(Symtab, File, &Node->Children[0]);
+		
+		// ...
+		
+	default:
+		return 0;
+	}
+}
+
+static int
+AnalyzeEnum(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	// TODO: implement enum semantic analysis.
+	return 1;
+}
+
+static int
+AnalyzeGlobalVar(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	if (Node->Flags & ANF_EXTERN && Node->ChildCnt == 2)
+	{
+		LogAstNodeErr(File, Node, "external variables cannot be declared with an initial value!");
+		return 1;
+	}
+	
+	struct AstNode const *VarType = &Node->Children[0];
+	if (AnalyzeCommonType(Symtab, File, VarType))
+		return 1;
+	
+	if (Node->ChildCnt == 2)
+	{
+		struct AstNode const *VarValue = &Node->Children[1];
+		if (AnalyzeConstExpr(Symtab, File, VarValue))
+			return 1;
+		
+		// TODO: perform global var initial assignment type analysis.
+	}
+	
+	return 1;
+}
+
+static int
+AnalyzeProc(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	// TODO: implement procedure semantic analysis.
+	return 1;
 }
 
 static void
@@ -1102,6 +1324,9 @@ BuildSymtabGlobals(struct Symtab *Out, struct ModuleDataGroup const *Modules)
 			struct FileData const *File = &Modules->Modules[i].File;
 			for (size_t j = 0; j < Ast->ChildCnt; ++j)
 			{
+				if (!(Ast->Children[j].Flags & ANF_PUBLIC))
+					continue;
+				
 				if (Symtab_RegisterAstNode(&Symtab, File, &Ast->Children[j]))
 				{
 					Symtab_Destroy(&Symtab);
@@ -2517,13 +2742,7 @@ LogAstNodeContext(
 	}
 	
 	struct Token const *FirstTok = Node->Toks[0];
-	struct Token const *LastTok = Node->Toks[Node->TokCnt - 1];
-	LogProgPosition(
-		Data,
-		FirstTok->Pos,
-		LastTok->Pos + LastTok->Len - FirstTok->Pos,
-		"1;36"
-	);
+	LogProgPosition(Data, FirstTok->Pos, FirstTok->Len, "1;36");
 }
 
 static void
@@ -2547,13 +2766,7 @@ LogAstNodeErr(
 	}
 	
 	struct Token const *FirstTok = Node->Toks[0];
-	struct Token const *LastTok = Node->Toks[Node->TokCnt - 1];
-	LogProgPosition(
-		Data,
-		FirstTok->Pos,
-		LastTok->Pos + LastTok->Len - FirstTok->Pos,
-		"1;31"
-	);
+	LogProgPosition(Data, FirstTok->Pos, FirstTok->Len, "1;31");
 }
 
 static void
@@ -3193,6 +3406,7 @@ ParseExpr(
 	case TT_LIT_BOOL:
 	case TT_KW_SELF:
 	case TT_KW_VARGCOUNT:
+	case TT_KW_VARGS:
 		Lhs.Type = ANT_EXPR_ATOM;
 		AstNode_AddToken(&Lhs, Tok);
 		break;
@@ -3205,6 +3419,7 @@ ParseExpr(
 		switch (Modified->Type)
 		{
 		case TT_LIT_STR:
+		case TT_KW_VARGS:
 			Lhs.Type = ANT_EXPR_ATOM;
 			Lhs.Flags |= ANF_BASE;
 			AstNode_AddToken(&Lhs, Tok);
@@ -4338,9 +4553,32 @@ ParseType(
 		case TT_KW_FLOAT64:
 		case TT_KW_SELF:
 		case TT_KW_NULL:
+		case TT_KW_VARGS:
+		case TT_TRIPLE_PERIOD:
 			Lhs.Type = ANT_TYPE_ATOM;
 			AstNode_AddToken(&Lhs, BaseType);
 			break;
+		case TT_KW_BASE:
+		{
+			struct Token const *Modified = RequireToken(Ps);
+			if (!Modified)
+				return 1;
+			
+			switch (Modified->Type)
+			{
+			case TT_KW_VARGS:
+			case TT_TRIPLE_PERIOD:
+				Lhs.Type = ANT_TYPE_ATOM;
+				Lhs.Flags |= ANF_BASE;
+				AstNode_AddToken(&Lhs, Modified);
+				break;
+			default:
+				LogTokErr(Ps->File, Modified, "expected TT_KW_VARGS or TT_TRIPLE_PERIOD!");
+				return 1;
+			}
+			
+			break;
+		}
 		default:
 			LogTokErr(Ps->File, BaseType, "expected type atom!");
 			return 1;
@@ -4447,28 +4685,6 @@ ParseType(
 				
 				switch (Tok->Type)
 				{
-				case TT_TRIPLE_PERIOD:
-					if (!ExpectToken(Ps, TT_PEND))
-					{
-						AstNode_Destroy(&Lhs);
-						return 1;
-					}
-					Lhs.Flags |= ANF_VARIADIC;
-					break;
-				case TT_KW_BASE:
-					if (!ExpectToken(Ps, TT_TRIPLE_PERIOD))
-					{
-						AstNode_Destroy(&Lhs);
-						return 1;
-					}
-					if (!ExpectToken(Ps, TT_PEND))
-					{
-						AstNode_Destroy(&Lhs);
-						return 1;
-					}
-					Lhs.Flags |= ANF_VARIADIC;
-					Lhs.Flags |= ANF_BASE;
-					break;
 				case TT_PEND:
 					break;
 				default:
@@ -4490,12 +4706,36 @@ ParseType(
 					break;
 			}
 			
+			if (Lhs.ChildCnt > 0)
+			{
+				struct AstNode const *Node = &Lhs.Children[Lhs.ChildCnt - 1];
+				if (Node->Toks[0]->Type == TT_TRIPLE_PERIOD)
+				{
+					Lhs.Flags |= Node->Flags & ANF_BASE;
+					Lhs.Flags |= ANF_VARIADIC;
+					AstNode_Destroy(&Lhs.Children[Lhs.ChildCnt - 1]);
+					--Lhs.ChildCnt;
+				}
+			}
+			
 			break;
 		}
 		case TT_KW_MUT:
 			if (Lhs.Flags & ANF_MUT)
 			{
 				LogTokErr(Ps->File, Mod, "mutability modifier cannot be applied on a type multiple times!");
+				AstNode_Destroy(&Lhs);
+				return 1;
+			}
+			if (Lhs.Toks[0]->Type == TT_KW_NULL)
+			{
+				LogTokErr(Ps->File, Mod, "mutability modifier cannot be applied to Null!");
+				AstNode_Destroy(&Lhs);
+				return 1;
+			}
+			if (Lhs.Toks[0]->Type == TT_TRIPLE_PERIOD)
+			{
+				LogTokErr(Ps->File, Mod, "mutability modifier cannot be applied to ...!");
 				AstNode_Destroy(&Lhs);
 				return 1;
 			}
@@ -4903,6 +5143,16 @@ PrintTimeData(void)
 			TimeData.CheckAcyclicityEnd - TimeData.CheckAcyclicityBegin
 		);
 		End = TimeData.CheckAcyclicityEnd;
+	}
+	
+	if (TimeData.AnalyzeEnd)
+	{
+		fprintf(
+			stderr,
+			"analyze               %lums\n",
+			TimeData.AnalyzeEnd - TimeData.AnalyzeBegin
+		);
+		End = TimeData.AnalyzeEnd;
 	}
 	
 	if (End)
