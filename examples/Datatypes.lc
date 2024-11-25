@@ -24,13 +24,13 @@ Struct Vec4
 	w Float32
 End
 
-Union VecN
+;Union VecN
 	; typenames are not stored in the same namespace as everything else.
 	; as such, you can name variables with the same name as their type.
-	Vec2 Vec2
-	Vec3 Vec3
-	Vec4 Vec4
-End
+;	Vec2 Vec2
+;	Vec3 Vec3
+;	Vec4 Vec4
+;End
 
 Struct Vec
 	Data VecN

@@ -1,4 +1,4 @@
-#include <ctype.h>
+ #include <ctype.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -398,6 +398,7 @@ struct Symtab
 static int Analyze(struct Symtab *Symtab, struct ModuleDataGroup const *Modules);
 static int AnalyzeCommonType(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
 static int AnalyzeConstExpr(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
+static int AnalyzeDataStructure(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
 static int AnalyzeEnum(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
 static int AnalyzeGlobalVar(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
 static int AnalyzeProc(struct Symtab *Symtab, struct FileData const *File, struct AstNode const *Node);
@@ -1046,6 +1047,11 @@ Analyze(struct Symtab *Symtab, struct ModuleDataGroup const *Modules)
 					if (AnalyzeGlobalVar(Symtab, &Mod->File, Child))
 						return 1;
 					break;
+				case ANT_STRUCT:
+				case ANT_UNION:
+					if (AnalyzeDataStructure(Symtab, &Mod->File, Child))
+						return 1;
+					break;
 				case ANT_ENUM:
 					if (AnalyzeEnum(Symtab, &Mod->File, Child))
 						return 1;
@@ -1073,9 +1079,15 @@ Analyze(struct Symtab *Symtab, struct ModuleDataGroup const *Modules)
 				if (AnalyzeGlobalVar(Symtab, &Mod->File, Child))
 					return 1;
 				break;
+			case ANT_STRUCT:
+			case ANT_UNION:
+				if (AnalyzeDataStructure(Symtab, &Mod->File, Child))
+					return 1;
+				break;
 			case ANT_ENUM:
 				if (AnalyzeEnum(Symtab, &Mod->File, Child))
 					return 1;
+				break;
 			default:
 				break;
 			}
@@ -1175,13 +1187,97 @@ AnalyzeConstExpr(
 }
 
 static int
+AnalyzeDataStructure(
+	struct Symtab *Symtab,
+	struct FileData const *File,
+	struct AstNode const *Node
+)
+{
+	for (size_t i = 0; i < Node->ChildCnt; ++i)
+	{
+		struct AstNode const *Memb = &Node->Children[i];
+		
+		// check for duplicate declaration.
+		for (size_t j = i + 1; j < Node->ChildCnt; ++j)
+		{
+			struct AstNode const *Other = &Node->Children[j];
+			
+			char const *MembName = Memb->Toks[0]->Data.Str.Text;
+			char const *OtherName = Other->Toks[0]->Data.Str.Text;
+			if (!strcmp(MembName, OtherName))
+			{
+				LogAstNodeErr(File, Other, "redeclaration of data structure member!");
+				LogAstNodeContext(File, Memb, "previously declared here:");
+				return 1;
+			}
+		}
+		
+		if (AnalyzeCommonType(Symtab, File, &Memb->Children[0]))
+			return 1;
+	}
+	
+	return 0;
+}
+
+static int
 AnalyzeEnum(
 	struct Symtab *Symtab,
 	struct FileData const *File,
 	struct AstNode const *Node
 )
 {
-	// TODO: implement enum semantic analysis.
+	// require enum is derived from integer type.
+	{
+		struct AstNode const *Type = &Node->Children[0];
+		struct Token const *Tok = Type->Children[0].Toks[0];
+		
+		switch (Tok->Type)
+		{
+		case TT_KW_UINT8:
+		case TT_KW_UINT16:
+		case TT_KW_UINT32:
+		case TT_KW_UINT64:
+		case TT_KW_USIZE:
+		case TT_KW_INT8:
+		case TT_KW_INT16:
+		case TT_KW_INT32:
+		case TT_KW_INT64:
+		case TT_KW_ISIZE:
+			break;
+		default:
+			LogAstNodeErr(File, Type, "enums must be derived from integer types!");
+			return 1;
+		}
+	}
+	
+	for (size_t i = 1; i < Node->ChildCnt; ++i)
+	{
+		struct AstNode const *Memb = &Node->Children[i];
+		
+		// check for duplicate declaration.
+		for (size_t j = i + 1; j < Node->ChildCnt; ++j)
+		{
+			struct AstNode const *Other = &Node->Children[j];
+			
+			char const *MembName = Memb->Toks[0]->Data.Str.Text;
+			char const *OtherName = Other->Toks[0]->Data.Str.Text;
+			if (!strcmp(MembName, OtherName))
+			{
+				LogAstNodeErr(File, Other, "redeclaration of enum member!");
+				LogAstNodeContext(File, Memb, "previously declared here:");
+				return 1;
+			}
+		}
+		
+		if (Memb->ChildCnt == 1)
+		{
+			if (AnalyzeConstExpr(Symtab, File, &Memb->Children[0]))
+				return 1;
+			
+			// TODO: implement typecheck for enum member.
+		}
+	}
+	
 	return 1;
 }
 
@@ -1646,33 +1742,30 @@ DepGraph_AddNode(struct DepGraph *Graph, struct DepNode const *Node)
 	
 	// allocate / move new memory in adjacency matrix if needed.
 	{
-		size_t OldRowSizeBytes = Graph->NodeCnt - 1;
-		size_t NewRowSizeBytes = Graph->NodeCnt;
-		size_t MvRegionSizeBytes = OldRowSizeBytes * NewRowSizeBytes;
+		size_t OldRowSize = Graph->NodeCnt - 1;
+		size_t NewRowSize = Graph->NodeCnt;
+		size_t MvRegionSize = OldRowSize * NewRowSize;
 		
-		if (NewRowSizeBytes > OldRowSizeBytes)
+		Graph->Adjacency = realloc(
+			Graph->Adjacency,
+			NewRowSize * NewRowSize
+		);
+		
+		for (size_t i = 0; i < MvRegionSize; i += NewRowSize)
 		{
-			Graph->Adjacency = realloc(
-				Graph->Adjacency,
-				NewRowSizeBytes * NewRowSizeBytes
+			memmove(
+				&Graph->Adjacency[i + 1],
+				&Graph->Adjacency[i],
+				MvRegionSize - i
 			);
-			
-			for (size_t i = OldRowSizeBytes; i < MvRegionSizeBytes; i += NewRowSizeBytes)
-			{
-				memmove(
-					&Graph->Adjacency[i + 1],
-					&Graph->Adjacency[i],
-					OldRowSizeBytes
-				);
-				Graph->Adjacency[i] = false;
-			}
-			
-			memset(
-				&Graph->Adjacency[NewRowSizeBytes * (NewRowSizeBytes - 1)],
-				0,
-				NewRowSizeBytes
-			);
+			Graph->Adjacency[i] = false;
 		}
+		
+		memset(
+			&Graph->Adjacency[NewRowSize * OldRowSize],
+			false,
+			NewRowSize
+		);
 	}
 	
 	return &Graph->Nodes[Graph->NodeCnt - 1];
